@@ -8,24 +8,30 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
+	"github.com/falluba/ai-desk/pkg/ui"
 )
 
 const version = "0.1.0"
 
 func printHelp() {
 	fmt.Printf("AI Desk v%s - Unified AI Command Center\n\n", version)
-	fmt.Println("Usage: ai-desk <command> [options] [arguments...]")
+	fmt.Println("Usage: ai-desk [command] [options] [arguments...]")
+	fmt.Println()
+	fmt.Println("Running 'ai-desk' with no arguments launches the interactive TUI.")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  tui, ui             Launch the interactive terminal user interface")
 	fmt.Println("  status              Show all saved accounts, quota meters, providers, and sessions")
 	fmt.Println("  run <tool> [args]   Launch an AI CLI wrapped with per-session sandboxing & auto-rotation")
 	fmt.Println("  session [action]    Manage tmux agent sessions (list, attach, new)")
 	fmt.Println("  providers [list]    Manage and inspect custom LLM providers (Ollama, OpenRouter, etc.)")
 	fmt.Println("  sync                Fetch upstream updates for agent-deck and agy-swap submodules")
 	fmt.Println("  version             Display version and system information")
+	fmt.Println("  help                Show this help message")
 	fmt.Println()
 }
 
@@ -106,7 +112,6 @@ func cmdRun(args []string) {
 	// Delegate to desk-shim
 	shimPath, err := exec.LookPath("desk-shim")
 	if err != nil {
-		// Look in current binary directory or ./bin/desk-shim
 		shimPath = "./bin/desk-shim"
 	}
 
@@ -213,9 +218,17 @@ func cmdSync() {
 	}
 }
 
+func runTUI() {
+	p := tea.NewProgram(ui.NewModel(), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		printHelp()
+		runTUI()
 		os.Exit(0)
 	}
 
@@ -223,6 +236,8 @@ func main() {
 	subArgs := os.Args[2:]
 
 	switch command {
+	case "tui", "ui":
+		runTUI()
 	case "status":
 		cmdStatus()
 	case "run":
