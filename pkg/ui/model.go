@@ -19,8 +19,9 @@ import (
 type FocusPane int
 
 const (
-	FocusSessions FocusPane = iota
-	FocusAccounts
+	FocusSelection FocusPane = iota
+	FocusTask
+	FocusStatus
 )
 
 type Model struct {
@@ -33,27 +34,30 @@ type Model struct {
 	selectedProvider int
 	activeAccount    string
 
-	// Hierarchical Groups & Tree
+	// Hierarchical Groups & Tree (Pane 1: Selection)
 	sdb             *deck.StateDB
 	treeRoots       []*deck.GroupNode
 	treeItems       []deck.TreeItem
 	selectedTreeIdx int
 
-	// Session Inspector Screen
-	showInspector     bool
+	// The Task (Pane 2: Live Terminal Capture)
+	taskScrollOffset int
+
+	// Per-Session Status (Pane 3: Live Telemetry)
 	currentInspection *deck.SessionInspection
+
+	// Full-screen Modals
+	showInspector     bool
+	showSkillsOverlay bool
+	skillsConfig      *harness.SkillProfilesConfig
+	selectedProfile   int
+	profileKeys       []string
 
 	// Cascade Delete Dialog
 	showDeleteDialog bool
 	deletePrompt     string
 	deleteIsGroup    bool
 	deleteTarget     string
-
-	// Skills Manager Overlay
-	showSkillsOverlay bool
-	skillsConfig      *harness.SkillProfilesConfig
-	selectedProfile   int
-	profileKeys       []string
 
 	width  int
 	height int
@@ -84,7 +88,7 @@ func NewModel() Model {
 	}
 
 	m := Model{
-		focus:        FocusSessions,
+		focus:        FocusSelection,
 		sb:           sb,
 		v:            v,
 		reg:          reg,
@@ -122,6 +126,35 @@ func (m *Model) reload() {
 	if m.selectedAccount >= len(m.accounts) && len(m.accounts) > 0 {
 		m.selectedAccount = len(m.accounts) - 1
 	}
+
+	m.updateHoveredInspection()
+}
+
+func (m *Model) updateHoveredInspection() {
+	if len(m.treeItems) == 0 || m.selectedTreeIdx < 0 || m.selectedTreeIdx >= len(m.treeItems) {
+		m.currentInspection = nil
+		return
+	}
+	item := m.treeItems[m.selectedTreeIdx]
+	if !item.IsGroup && item.Session != nil {
+		if m.sdb != nil {
+			insp, err := m.sdb.InspectSession(item.Session.ID)
+			if err == nil {
+				m.currentInspection = insp
+				return
+			}
+		}
+	} else if item.IsGroup && item.GroupNode != nil {
+		m.currentInspection = &deck.SessionInspection{
+			Instance: deck.InstanceRecord{
+				Title:       item.GroupNode.Name,
+				GroupPath:   item.GroupNode.Path,
+				Status:      "group",
+				Tool:        "group",
+			},
+			ActiveProfile: "group",
+		}
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -145,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 
-		// 1. Handle Delete Confirmation Dialog
+		// 1. Delete Confirmation Dialog Modal
 		if m.showDeleteDialog {
 			switch key {
 			case "y", "Y":
@@ -175,7 +208,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 2. Handle Session Inspector Modal
+		// 2. Full-Screen Session Inspector Modal
 		if m.showInspector {
 			switch key {
 			case "esc", "i", "q":
@@ -193,9 +226,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 3. Global Shortcuts
+		// 3. Global Navigation Keys
 		switch key {
-		case "q", "ctrl+c":
+		case "ctrl+c":
+			return m, tea.Quit
+
+		case "q":
+			if m.showSkillsOverlay {
+				m.showSkillsOverlay = false
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case "s":
@@ -208,7 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "i":
-			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+			if len(m.treeItems) > 0 {
 				item := m.treeItems[m.selectedTreeIdx]
 				if !item.IsGroup && item.Session != nil {
 					if m.sdb != nil {
@@ -226,7 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "d":
-			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+			if len(m.treeItems) > 0 {
 				item := m.treeItems[m.selectedTreeIdx]
 				if item.IsGroup && item.GroupNode != nil {
 					m.showDeleteDialog = true
@@ -242,13 +282,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case "tab", "l", "h", "left", "right":
+		case "tab":
 			if !m.showSkillsOverlay {
-				if m.focus == FocusSessions {
-					m.focus = FocusAccounts
-				} else {
-					m.focus = FocusSessions
-				}
+				m.focus = (m.focus + 1) % 3
+			}
+			return m, nil
+
+		case "h", "left":
+			if !m.showSkillsOverlay {
+				m.focus = (m.focus + 2) % 3
+			}
+			return m, nil
+
+		case "l", "right":
+			if !m.showSkillsOverlay {
+				m.focus = (m.focus + 1) % 3
 			}
 			return m, nil
 
@@ -257,15 +305,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selectedProfile > 0 {
 					m.selectedProfile--
 				}
-			} else if m.focus == FocusSessions {
-				if len(m.treeItems) > 0 {
-					if m.selectedTreeIdx > 0 {
-						m.selectedTreeIdx--
-					}
-				} else if m.selectedSession > 0 {
-					m.selectedSession--
+			} else if m.focus == FocusSelection {
+				if len(m.treeItems) > 0 && m.selectedTreeIdx > 0 {
+					m.selectedTreeIdx--
+					m.taskScrollOffset = 0
+					m.updateHoveredInspection()
 				}
-			} else {
+			} else if m.focus == FocusTask {
+				m.taskScrollOffset++
+			} else if m.focus == FocusStatus {
 				if m.selectedAccount > 0 {
 					m.selectedAccount--
 				}
@@ -277,24 +325,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selectedProfile < len(m.profileKeys)-1 {
 					m.selectedProfile++
 				}
-			} else if m.focus == FocusSessions {
-				if len(m.treeItems) > 0 {
-					if m.selectedTreeIdx < len(m.treeItems)-1 {
-						m.selectedTreeIdx++
-					}
-				} else if m.selectedSession < len(m.sessions)-1 {
-					m.selectedSession++
+			} else if m.focus == FocusSelection {
+				if len(m.treeItems) > 0 && m.selectedTreeIdx < len(m.treeItems)-1 {
+					m.selectedTreeIdx++
+					m.taskScrollOffset = 0
+					m.updateHoveredInspection()
 				}
-			} else {
+			} else if m.focus == FocusTask {
+				if m.taskScrollOffset > 0 {
+					m.taskScrollOffset--
+				}
+			} else if m.focus == FocusStatus {
 				if m.selectedAccount < len(m.accounts)-1 {
 					m.selectedAccount++
 				}
 			}
 			return m, nil
 
+		case "pgup":
+			if m.focus == FocusTask {
+				m.taskScrollOffset += 8
+			}
+			return m, nil
+
+		case "pgdown":
+			if m.focus == FocusTask {
+				if m.taskScrollOffset > 8 {
+					m.taskScrollOffset -= 8
+				} else {
+					m.taskScrollOffset = 0
+				}
+			}
+			return m, nil
+
 		case " ":
-			// Toggle expand/collapse on group
-			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+			// Toggle expand/collapse on group in Selection pane
+			if len(m.treeItems) > 0 {
 				item := m.treeItems[m.selectedTreeIdx]
 				if item.IsGroup && item.GroupNode != nil {
 					item.GroupNode.Expanded = !item.GroupNode.Expanded
@@ -302,6 +368,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.selectedTreeIdx >= len(m.treeItems) {
 						m.selectedTreeIdx = len(m.treeItems) - 1
 					}
+					m.updateHoveredInspection()
 				}
 			}
 			return m, nil
@@ -320,41 +387,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			if m.focus == FocusSessions {
-				if len(m.treeItems) > 0 {
-					item := m.treeItems[m.selectedTreeIdx]
-					if item.IsGroup && item.GroupNode != nil {
-						// Toggle expand/collapse
-						item.GroupNode.Expanded = !item.GroupNode.Expanded
-						m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
-						if m.selectedTreeIdx >= len(m.treeItems) {
-							m.selectedTreeIdx = len(m.treeItems) - 1
-						}
-						return m, nil
-					} else if !item.IsGroup && item.Session != nil {
-						sessName := item.Session.TmuxSession
-						if sessName == "" {
-							sessName = item.Session.ID
-						}
-						c := exec.Command("tmux", "attach-session", "-t", sessName)
-						return m, tea.ExecProcess(c, func(err error) tea.Msg {
-							return attachFinishedMsg{err: err}
-						})
+			if len(m.treeItems) > 0 {
+				item := m.treeItems[m.selectedTreeIdx]
+				if item.IsGroup && item.GroupNode != nil {
+					// Toggle expand/collapse
+					item.GroupNode.Expanded = !item.GroupNode.Expanded
+					m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
+					if m.selectedTreeIdx >= len(m.treeItems) {
+						m.selectedTreeIdx = len(m.treeItems) - 1
 					}
-				} else if len(m.sessions) > 0 {
-					sess := m.sessions[m.selectedSession]
-					c := exec.Command("tmux", "attach-session", "-t", sess.ID)
+					m.updateHoveredInspection()
+					return m, nil
+				} else if !item.IsGroup && item.Session != nil {
+					sessName := item.Session.TmuxSession
+					if sessName == "" {
+						sessName = item.Session.ID
+					}
+					c := exec.Command("tmux", "attach-session", "-t", sessName)
 					return m, tea.ExecProcess(c, func(err error) tea.Msg {
 						return attachFinishedMsg{err: err}
 					})
 				}
-			} else if m.focus == FocusAccounts && len(m.accounts) > 0 {
-				acc := m.accounts[m.selectedAccount]
-				m.activeAccount = acc.Email
-				token, _ := sbReadToken(m.sb, acc.Email)
-				_ = m.v.WriteAgyToken(acc.Email, token, acc.Email)
-				m.setToast(fmt.Sprintf("Active session switched to %s", acc.Email))
-				return m, nil
+			} else if len(m.sessions) > 0 {
+				sess := m.sessions[m.selectedSession]
+				c := exec.Command("tmux", "attach-session", "-t", sess.ID)
+				return m, tea.ExecProcess(c, func(err error) tea.Msg {
+					return attachFinishedMsg{err: err}
+				})
 			}
 		}
 	}
@@ -376,10 +435,10 @@ func (m Model) View() string {
 		return "Loading AI Desk..."
 	}
 
-	// 1. Header
+	// 1. Top Header
 	header := m.renderHeader()
 
-	// 2. Main content
+	// 2. Main Content
 	contentHeight := m.height - 7
 	if contentHeight < 10 {
 		contentHeight = 10
@@ -393,21 +452,38 @@ func (m Model) View() string {
 	} else if m.showSkillsOverlay {
 		mainContent = m.renderSkillsOverlay(m.width-4, contentHeight)
 	} else {
-		leftWidth := (m.width * 55) / 100
-		rightWidth := m.width - leftWidth - 4
-		if leftWidth < 30 {
-			leftWidth = 30
-		}
-		if rightWidth < 30 {
-			rightWidth = 30
+		// 3-Pane Side-by-Side Layout
+		availWidth := m.width - 6
+		if availWidth < 80 {
+			availWidth = 80
 		}
 
-		leftPane := m.renderSessionsPane(leftWidth, contentHeight)
-		rightPane := m.renderAccountsPane(rightWidth, contentHeight)
-		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, " ", rightPane)
+		// Pane 1 (Selection): ~28%
+		col1Width := (availWidth * 28) / 100
+		if col1Width < 26 {
+			col1Width = 26
+		}
+
+		// Pane 3 (Session Status): ~30%
+		col3Width := (availWidth * 30) / 100
+		if col3Width < 28 {
+			col3Width = 28
+		}
+
+		// Pane 2 (The Task): remaining ~42%
+		col2Width := availWidth - col1Width - col3Width
+		if col2Width < 30 {
+			col2Width = 30
+		}
+
+		pane1 := m.renderSelectionPane(col1Width, contentHeight)
+		pane2 := m.renderTaskPane(col2Width, contentHeight)
+		pane3 := m.renderStatusPane(col3Width, contentHeight)
+
+		mainContent = lipgloss.JoinHorizontal(lipgloss.Top, pane1, " ", pane2, " ", pane3)
 	}
 
-	// 3. Footer / Help
+	// 3. Footer / Shortcuts
 	footer := m.renderFooter()
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, mainContent, footer)
@@ -440,24 +516,23 @@ func (m Model) renderHeader() string {
 	return lipgloss.NewStyle().MarginBottom(1).Render(topLine)
 }
 
-func (m Model) renderSessionsPane(width, height int) string {
+// Pane 1: Selection (Hierarchical Tree of Groups & Tasks)
+func (m Model) renderSelectionPane(width, height int) string {
 	bStyle := inactiveBorder
-	if m.focus == FocusSessions {
+	if m.focus == FocusSelection {
 		bStyle = activeBorder
 	}
 
-	totalCount := len(m.treeItems)
-	title := fmt.Sprintf("Sessions & Hierarchy (%d items)", totalCount)
+	title := fmt.Sprintf("1. Selection (%d items)", len(m.treeItems))
 	var lines []string
 
 	if len(m.treeItems) == 0 && len(m.sessions) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("No active groups or sessions found."))
+		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("No active groups or sessions."))
 		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Spawn one with: ai-desk run <tool>"))
 	} else if len(m.treeItems) > 0 {
-		// Render hierarchical tree
 		for i, item := range m.treeItems {
 			indent := strings.Repeat("  ", item.Depth)
-			isSelected := i == m.selectedTreeIdx && m.focus == FocusSessions
+			isSelected := i == m.selectedTreeIdx
 
 			if item.IsGroup && item.GroupNode != nil {
 				prefix := "▼ "
@@ -485,8 +560,8 @@ func (m Model) renderSessionsPane(width, height int) string {
 
 				bullet := lipgloss.NewStyle().Foreground(bulletColor).Render(statusBullet)
 				toolBadge := lipgloss.NewStyle().Foreground(subtleColor).Render("[" + item.Session.Tool + "]")
-				titleStr := truncateString(item.Session.Title, width-item.Depth*2-26)
-				rowContent := fmt.Sprintf("%s%s %-18s %s", indent, bullet, titleStr, toolBadge)
+				titleStr := truncateString(item.Session.Title, width-item.Depth*2-22)
+				rowContent := fmt.Sprintf("%s%s %-14s %s", indent, bullet, titleStr, toolBadge)
 
 				if isSelected {
 					lines = append(lines, selectedRow.Width(width-4).Render("▶ "+rowContent))
@@ -496,22 +571,187 @@ func (m Model) renderSessionsPane(width, height int) string {
 			}
 		}
 	} else {
-		// Fallback to flat tmux sessions
 		for i, s := range m.sessions {
 			badge := lipgloss.NewStyle().Foreground(subtleColor).Render("[IDLE]")
 			if s.Attached {
 				badge = lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("[ATTACHED]")
 			}
-
-			titleStr := truncateString(s.Title, width-22)
-			rowContent := fmt.Sprintf("%-24s  %s  %s", titleStr, badge, s.CreatedAt.Format("15:04"))
-
-			if i == m.selectedSession && m.focus == FocusSessions {
+			titleStr := truncateString(s.Title, width-20)
+			rowContent := fmt.Sprintf("%-16s %s", titleStr, badge)
+			if i == m.selectedSession {
 				lines = append(lines, selectedRow.Width(width-4).Render("▶ "+rowContent))
 			} else {
 				lines = append(lines, normalRow.Render("  "+rowContent))
 			}
 		}
+	}
+
+	body := strings.Join(lines, "\n")
+	return bStyle.Width(width).Height(height).Render(
+		lipgloss.JoinVertical(lipgloss.Left, headerStyle.Render(title), body),
+	)
+}
+
+// Pane 2: The Task (Live Terminal Capture Preview)
+func (m Model) renderTaskPane(width, height int) string {
+	bStyle := inactiveBorder
+	if m.focus == FocusTask {
+		bStyle = activeBorder
+	}
+
+	var title string
+	var lines []string
+
+	if len(m.treeItems) == 0 {
+		title = "2. Task (No Active Session)"
+		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("No session selected."))
+	} else {
+		item := m.treeItems[m.selectedTreeIdx]
+
+		if item.IsGroup && item.GroupNode != nil {
+			title = fmt.Sprintf("2. Task: Group %s", item.GroupNode.Name)
+			lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Group Overview:"))
+			lines = append(lines, fmt.Sprintf("  • Full Path:       %s", lipgloss.NewStyle().Foreground(lipgloss.Color("#38bdf8")).Render(item.GroupNode.Path)))
+			lines = append(lines, fmt.Sprintf("  • Total Sessions:  %d tasks", item.GroupNode.TotalTasks))
+			lines = append(lines, fmt.Sprintf("  • Subgroups:       %d nested", len(item.GroupNode.Children)))
+			lines = append(lines, fmt.Sprintf("  • Direct Tasks:    %d", len(item.GroupNode.Sessions)))
+			lines = append(lines, "")
+			lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Shortcuts for Group:"))
+			lines = append(lines, "  • [Space] or [Enter] : Toggle expand/collapse")
+			lines = append(lines, "  • [d]                 : Cascade delete group and ALL sessions")
+			lines = append(lines, "  • [g]                 : Create new subgroup")
+		} else if !item.IsGroup && item.Session != nil {
+			title = fmt.Sprintf("2. Task: %s [%s]", item.Session.Title, strings.ToUpper(item.Session.Status))
+
+			if m.currentInspection != nil && len(m.currentInspection.TerminalPreview) > 0 {
+				preview := m.currentInspection.TerminalPreview
+				availLines := height - 4
+				if availLines < 4 {
+					availLines = 4
+				}
+
+				totalLines := len(preview)
+				endIdx := totalLines - m.taskScrollOffset
+				if endIdx > totalLines {
+					endIdx = totalLines
+				}
+				if endIdx < availLines {
+					endIdx = availLines
+				}
+				startIdx := endIdx - availLines
+				if startIdx < 0 {
+					startIdx = 0
+				}
+
+				if m.taskScrollOffset > 0 {
+					lines = append(lines, lipgloss.NewStyle().Foreground(warningColor).Render(fmt.Sprintf("[↑ History Scroll -%d lines]", m.taskScrollOffset)))
+				}
+
+				for i := startIdx; i < endIdx && i < totalLines; i++ {
+					l := preview[i]
+					if len(l) > width-6 {
+						l = l[:width-9] + "..."
+					}
+					lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("│ ")+l)
+				}
+			} else {
+				lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Terminal preview unavailable (session idle or detached)."))
+				lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Press [Enter] to attach interactive terminal."))
+			}
+		}
+	}
+
+	body := strings.Join(lines, "\n")
+	return bStyle.Width(width).Height(height).Render(
+		lipgloss.JoinVertical(lipgloss.Left, headerStyle.Render(title), body),
+	)
+}
+
+// Pane 3: Per-Session Status (Live Telemetry & Diagnostics)
+func (m Model) renderStatusPane(width, height int) string {
+	bStyle := inactiveBorder
+	if m.focus == FocusStatus {
+		bStyle = activeBorder
+	}
+
+	title := "3. Session Status"
+	var lines []string
+
+	if m.currentInspection != nil && m.currentInspection.Instance.Status != "group" {
+		insp := m.currentInspection
+
+		// 1. Session Identity
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Session Info:"))
+		lines = append(lines, fmt.Sprintf("  • Title:   %s", lipgloss.NewStyle().Bold(true).Render(truncateString(insp.Instance.Title, width-16))))
+		lines = append(lines, fmt.Sprintf("  • Tool:    %s", insp.Instance.Tool))
+		if insp.Instance.TmuxSession != "" {
+			lines = append(lines, fmt.Sprintf("  • Tmux:    %s", truncateString(insp.Instance.TmuxSession, width-16)))
+		}
+		if insp.Uptime > 0 {
+			lines = append(lines, fmt.Sprintf("  • Uptime:  %s", insp.Uptime.Round(time.Second)))
+		}
+		lines = append(lines, "")
+
+		// 2. Active Skill Profile & Prompt Tax
+		taxColor := successColor
+		if insp.PromptTaxTurn > 2000 {
+			taxColor = errorColor
+		} else if insp.PromptTaxTurn > 800 {
+			taxColor = warningColor
+		}
+		taxBadge := lipgloss.NewStyle().Foreground(taxColor).Bold(true).Render(fmt.Sprintf("~%d tok/turn", insp.PromptTaxTurn))
+
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Active Skills & Tax:"))
+		lines = append(lines, fmt.Sprintf("  • Profile: %s  %s", lipgloss.NewStyle().Bold(true).Render(insp.ActiveProfile), taxBadge))
+		if len(insp.ActiveSkills) > 0 {
+			skillsSummary := strings.Join(insp.ActiveSkills, ", ")
+			if len(skillsSummary) > width-16 {
+				skillsSummary = skillsSummary[:width-19] + "..."
+			}
+			lines = append(lines, fmt.Sprintf("  • Skills:  %s", lipgloss.NewStyle().Foreground(subtleColor).Render(skillsSummary)))
+		}
+		lines = append(lines, "")
+
+		// 3. Token Telemetry
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Token Usage:"))
+		if insp.HasTokenMetrics {
+			lines = append(lines, fmt.Sprintf("  • Total:   %s", formatNumber(insp.TokensUsed.TotalTokens)))
+			lines = append(lines, fmt.Sprintf("  • In/Out:  %s / %s", formatNumber(insp.TokensUsed.InputTokens), formatNumber(insp.TokensUsed.OutputTokens)))
+			if insp.TokensUsed.CachedInputTokens > 0 {
+				cachePct := float64(insp.TokensUsed.CachedInputTokens) / float64(insp.TokensUsed.InputTokens) * 100.0
+				lines = append(lines, fmt.Sprintf("  • Cached:  %s (%s)", formatNumber(insp.TokensUsed.CachedInputTokens), lipgloss.NewStyle().Foreground(successColor).Render(fmt.Sprintf("%.1f%%", cachePct))))
+			}
+		} else {
+			lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("  • No turn metrics in log."))
+		}
+
+		// 4. RTK Savings
+		if insp.RTKSavings != nil && insp.RTKSavings.TotalCommands > 0 {
+			lines = append(lines, fmt.Sprintf("  • RTK:     %s saved (%.1f%%)", formatNumber(int64(insp.RTKSavings.TotalSaved)), insp.RTKSavings.AvgSavingsPct*100.0))
+		}
+		lines = append(lines, "")
+
+		// 5. Account & Quota mini-meter
+		if len(m.accounts) > 0 {
+			acc := m.accounts[m.selectedAccount]
+			bar := m.renderProgressBar(acc.RemainingQuotaPct, 10)
+			lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Active Account:"))
+			lines = append(lines, fmt.Sprintf("  • %s %4.0f%%", bar, acc.RemainingQuotaPct))
+		}
+
+	} else {
+		// Group overview in status pane
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("Group Status:"))
+		if len(m.treeItems) > 0 {
+			item := m.treeItems[m.selectedTreeIdx]
+			if item.GroupNode != nil {
+				lines = append(lines, fmt.Sprintf("  • Name:   %s", item.GroupNode.Name))
+				lines = append(lines, fmt.Sprintf("  • Tasks:  %d total", item.GroupNode.TotalTasks))
+				lines = append(lines, fmt.Sprintf("  • Path:   %s", item.GroupNode.Path))
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Select a task session to inspect active skills, tokens used, and live telemetry."))
 	}
 
 	body := strings.Join(lines, "\n")
@@ -540,69 +780,6 @@ func (m Model) renderDeleteDialog(width, height int) string {
 	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("[y] Confirm & Delete   •   [n/Esc] Cancel"))
 
 	return bStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
-}
-
-func (m Model) renderAccountsPane(width, height int) string {
-	bStyle := inactiveBorder
-	if m.focus == FocusAccounts {
-		bStyle = activeBorder
-	}
-
-	var sections []string
-
-	// Accounts Section
-	accTitle := headerStyle.Render("Google Accounts (agy-swap)")
-	sections = append(sections, accTitle)
-
-	if len(m.accounts) == 0 {
-		sections = append(sections, lipgloss.NewStyle().Foreground(subtleColor).Render("No accounts in ~/.gemini/agy-swap/accounts.json"))
-	} else {
-		for i, a := range m.accounts {
-			bar := m.renderProgressBar(a.RemainingQuotaPct, 12)
-			activeTag := ""
-			if a.Email == m.activeAccount {
-				activeTag = lipgloss.NewStyle().Foreground(accentColor).Render("●")
-			}
-
-			rowContent := fmt.Sprintf("%s %-22s %s %4.0f%%", activeTag, truncateString(a.Email, 20), bar, a.RemainingQuotaPct)
-			if i == m.selectedAccount && m.focus == FocusAccounts {
-				sections = append(sections, selectedRow.Width(width-4).Render("▶ "+rowContent))
-			} else {
-				sections = append(sections, normalRow.Render("  "+rowContent))
-			}
-		}
-	}
-
-	// Providers Section
-	sections = append(sections, "\n"+headerStyle.Render("Custom Providers (~/.ai-desk/providers.yaml)"))
-	if len(m.providerList) == 0 {
-		sections = append(sections, lipgloss.NewStyle().Foreground(subtleColor).Render("No custom providers configured."))
-	} else {
-		for _, p := range m.providerList {
-			endpoint := truncateString(p.BaseURL, width-18)
-			row := fmt.Sprintf("• %-12s %s", p.Name, lipgloss.NewStyle().Foreground(subtleColor).Render(endpoint))
-			sections = append(sections, normalRow.Render(row))
-		}
-	}
-
-	// RTK Token Optimization Section
-	sections = append(sections, "\n"+headerStyle.Render("RTK Token Saver (Rust Token Killer)"))
-	rtkClient := rtk.NewClient()
-	if rtkClient.IsInstalled() {
-		ver, _ := rtkClient.Version()
-		statusLine := fmt.Sprintf("• Status: %s (%s)", lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("Active"), ver)
-		sections = append(sections, normalRow.Render(statusLine))
-		if savings, err := rtkClient.GetSavings(); err == nil && savings.TotalCommands > 0 {
-			statLine := fmt.Sprintf("• Commands: %d | Saved: %d tokens (%.1f%%)",
-				savings.TotalCommands, savings.TotalSaved, savings.AvgSavingsPct*100)
-			sections = append(sections, normalRow.Render(statLine))
-		}
-	} else {
-		sections = append(sections, normalRow.Render("• Status: Not installed (make install-rtk)"))
-	}
-
-	body := strings.Join(sections, "\n")
-	return bStyle.Width(width).Height(height).Render(body)
 }
 
 func (m Model) renderSkillsOverlay(width, height int) string {
@@ -689,13 +866,13 @@ func (m Model) renderFooter() string {
 		}
 	} else {
 		keys = []string{
-			helpKeyStyle.Render("Tab") + " " + helpDescStyle.Render("Switch Pane"),
+			helpKeyStyle.Render("Tab/h/l") + " " + helpDescStyle.Render("Switch Pane"),
 			helpKeyStyle.Render("↑/↓") + " " + helpDescStyle.Render("Navigate"),
 			helpKeyStyle.Render("Space") + " " + helpDescStyle.Render("Expand/Collapse"),
-			helpKeyStyle.Render("Enter") + " " + helpDescStyle.Render("Attach/Toggle"),
-			helpKeyStyle.Render("i") + " " + helpDescStyle.Render("Inspect Session"),
+			helpKeyStyle.Render("Enter") + " " + helpDescStyle.Render("Attach Tmux"),
 			helpKeyStyle.Render("d") + " " + helpDescStyle.Render("Delete Group/Task"),
 			helpKeyStyle.Render("s") + " " + helpDescStyle.Render("Skills"),
+			helpKeyStyle.Render("i") + " " + helpDescStyle.Render("Inspect"),
 			helpKeyStyle.Render("r") + " " + helpDescStyle.Render("Refresh"),
 			helpKeyStyle.Render("q") + " " + helpDescStyle.Render("Quit"),
 		}
