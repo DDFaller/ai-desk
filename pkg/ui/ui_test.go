@@ -19,8 +19,8 @@ func TestUI_ModelLifecycle(t *testing.T) {
 	if !strings.Contains(view, "AI DESK") {
 		t.Errorf("expected view to contain 'AI DESK', got:\n%s", view)
 	}
-	if !strings.Contains(view, "Active Tmux Sessions") {
-		t.Errorf("expected view to contain 'Active Tmux Sessions', got:\n%s", view)
+	if !strings.Contains(view, "Sessions") {
+		t.Errorf("expected view to contain 'Sessions', got:\n%s", view)
 	}
 
 	// 3. Toggle pane focus with Tab
@@ -28,6 +28,29 @@ func TestUI_ModelLifecycle(t *testing.T) {
 	model = mUpdated.(Model)
 	if model.focus != FocusAccounts {
 		t.Errorf("expected focus on Accounts pane after Tab, got %v", model.focus)
+	}
+
+	// Switch back to Sessions
+	mUpdated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = mUpdated.(Model)
+
+	// Test Inspector toggle on session
+	mUpdated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = mUpdated.(Model)
+
+	// Test Delete dialog open and cancel
+	mUpdated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = mUpdated.(Model)
+	if len(model.treeItems) > 0 {
+		if !model.showDeleteDialog {
+			t.Errorf("expected delete dialog open on 'd'")
+		}
+		// Cancel dialog with esc
+		mUpdated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEscape})
+		model = mUpdated.(Model)
+		if model.showDeleteDialog {
+			t.Errorf("expected delete dialog closed after Escape")
+		}
 	}
 
 	// 4. Test Quit key

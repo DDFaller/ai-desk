@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/falluba/ai-desk/pkg/deck"
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
@@ -34,7 +35,9 @@ func printHelp() {
 	fmt.Println("                      Actions: list, audit, attach <tool> <acc> <skill>, detach <tool> <acc> <skill>")
 	fmt.Println("  rtk [action]        Inspect RTK token savings dashboard or initialize harness hooks")
 	fmt.Println("                      Actions: gain (default), init, config")
-	fmt.Println("  session [action]    Manage tmux agent sessions (list, attach, new)")
+	fmt.Println("  group [action]      Manage hierarchical groups & subgroups")
+	fmt.Println("                      Actions: list, create <path>, delete <path> -r, move <session> <group>")
+	fmt.Println("  session [action]    Manage agent sessions (list, attach, inspect <id|title>)")
 	fmt.Println("  providers [list]    Manage and inspect custom LLM providers (Ollama, OpenRouter, etc.)")
 	fmt.Println("  sync                Fetch upstream updates for agent-deck and agy-swap submodules")
 	fmt.Println("  version             Display version and system information")
@@ -367,6 +370,194 @@ func cmdSession(args []string) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		_ = cmd.Run()
+	case "inspect", "info", "show":
+		if len(args) < 2 {
+			fmt.Println("Usage: ai-desk session inspect <id|title>")
+			return
+		}
+		cmdSessionInspect(args[1])
+	}
+}
+
+func cmdSessionInspect(identifier string) {
+	sdb, err := deck.OpenStateDB("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening state.db: %v\n", err)
+		return
+	}
+	defer sdb.Close()
+
+	insp, err := sdb.InspectSession(identifier)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error inspecting session %q: %v\n", identifier, err)
+		return
+	}
+
+	fmt.Printf("\n\033[1;36m=== AI Desk Session Inspector ===\033[0m\n\n")
+	fmt.Printf("  \033[1mSession:\033[0m        %s (\033[90m%s\033[0m)\n", insp.Instance.Title, insp.Instance.ID)
+	fmt.Printf("  \033[1mGroup:\033[0m          \033[1;34m%s\033[0m\n", insp.Instance.GroupPath)
+	fmt.Printf("  \033[1mWorking Dir:\033[0m    %s\n", insp.Instance.ProjectPath)
+	fmt.Printf("  \033[1mTool / Harness:\033[0m %s\n", insp.Instance.Tool)
+	fmt.Printf("  \033[1mStatus:\033[0m         %s (Attached: %v)\n", insp.Instance.Status, insp.Attached)
+	if insp.Uptime > 0 {
+		fmt.Printf("  \033[1mUptime:\033[0m         %s\n", insp.Uptime.Round(time.Second))
+	}
+	if insp.Instance.TmuxSession != "" {
+		fmt.Printf("  \033[1mTmux Session:\033[0m   %s\n", insp.Instance.TmuxSession)
+	}
+
+	fmt.Printf("\n  \033[1mActive Skills & Prompt Tax:\033[0m\n")
+	fmt.Printf("    • Profile:    \033[1;32m%s\033[0m (%d active skills)\n", insp.ActiveProfile, len(insp.ActiveSkills))
+	fmt.Printf("    • Prompt Tax: \033[1;33m~%d tokens/turn\033[0m\n", insp.PromptTaxTurn)
+	if len(insp.ActiveSkills) > 0 {
+		fmt.Printf("    • Skills:     %s\n", strings.Join(insp.ActiveSkills, ", "))
+	}
+
+	fmt.Printf("\n  \033[1mToken Telemetry:\033[0m\n")
+	if insp.HasTokenMetrics {
+		fmt.Printf("    • Total Tokens:  \033[1m%d\033[0m (Input: %d, Output: %d)\n",
+			insp.TokensUsed.TotalTokens, insp.TokensUsed.InputTokens, insp.TokensUsed.OutputTokens)
+		if insp.TokensUsed.CachedInputTokens > 0 {
+			cachePct := float64(insp.TokensUsed.CachedInputTokens) / float64(insp.TokensUsed.InputTokens) * 100.0
+			fmt.Printf("    • Cached Tokens: %d (%.1f%% cache hit)\n", insp.TokensUsed.CachedInputTokens, cachePct)
+		}
+		if insp.TokensUsed.ReasoningTokens > 0 {
+			fmt.Printf("    • Reasoning Out: %d tokens\n", insp.TokensUsed.ReasoningTokens)
+		}
+	} else {
+		fmt.Printf("    • No turn token metrics recorded yet.\n")
+	}
+
+	if insp.RTKSavings != nil && insp.RTKSavings.TotalCommands > 0 {
+		fmt.Printf("    • RTK Savings:   %d tokens saved across %d commands (%.1f%% output reduction)\n",
+			insp.RTKSavings.TotalSaved, insp.RTKSavings.TotalCommands, insp.RTKSavings.AvgSavingsPct*100.0)
+	}
+
+	if len(insp.TerminalPreview) > 0 {
+		fmt.Printf("\n  \033[1mLive Terminal Capture (Last %d lines):\033[0m\n", len(insp.TerminalPreview))
+		for _, l := range insp.TerminalPreview {
+			fmt.Printf("    \033[90m│\033[0m %s\n", l)
+		}
+	}
+	fmt.Println()
+}
+
+func cmdGroup(args []string) {
+	sdb, err := deck.OpenStateDB("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening state.db: %v\n", err)
+		return
+	}
+	defer sdb.Close()
+
+	action := "list"
+	if len(args) > 0 {
+		action = args[0]
+	}
+
+	switch action {
+	case "list":
+		groups, err := sdb.LoadGroups()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading groups: %v\n", err)
+			return
+		}
+		instances, err := sdb.LoadInstances()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading instances: %v\n", err)
+			return
+		}
+
+		roots := deck.BuildGroupTree(groups, instances)
+		fmt.Printf("\n\033[1;36m=== AI Desk Group Hierarchy (%d groups, %d tasks) ===\033[0m\n\n", len(groups), len(instances))
+		printGroupTreeCLI(roots, "")
+		fmt.Println()
+
+	case "create":
+		if len(args) < 2 {
+			fmt.Println("Usage: ai-desk group create <group/subgroup/path>")
+			return
+		}
+		path := args[1]
+		if err := sdb.CreateGroup(path); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating group: %v\n", err)
+			return
+		}
+		fmt.Printf("\033[32m✓ Group %q created successfully (including any missing parents)!\033[0m\n", path)
+
+	case "delete", "del", "rm":
+		if len(args) < 2 {
+			fmt.Println("Usage: ai-desk group delete <group_path> [-r|--cascade]")
+			return
+		}
+		path := args[1]
+		cascade := false
+		for _, a := range args[2:] {
+			if a == "-r" || a == "--cascade" || a == "--force" || a == "-f" {
+				cascade = true
+			}
+		}
+
+		if !cascade {
+			fmt.Printf("\033[1;33mWarning:\033[0m Deleting group %q without cascade flag.\n", path)
+			fmt.Println("To delete this group AND all tasks/subgroups inside it, rerun with -r or --cascade:")
+			fmt.Printf("  ai-desk group delete %q --cascade\n", path)
+			return
+		}
+
+		deleted, err := sdb.DeleteGroupCascade(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error deleting group: %v\n", err)
+			return
+		}
+		fmt.Printf("\033[32m✓ Group %q and all %d associated sessions/subgroups deleted successfully!\033[0m\n", path, len(deleted))
+		for _, d := range deleted {
+			fmt.Printf("  • Terminated & removed session: %s [%s]\n", d.Title, d.ID)
+		}
+
+	case "move", "mv":
+		if len(args) < 3 {
+			fmt.Println("Usage: ai-desk group move <session_id_or_title> <target_group_path>")
+			return
+		}
+		targetSess := args[1]
+		targetGroup := args[2]
+		if err := sdb.MoveSession(targetSess, targetGroup); err != nil {
+			fmt.Fprintf(os.Stderr, "Error moving session: %v\n", err)
+			return
+		}
+		fmt.Printf("\033[32m✓ Session %q moved to group %q successfully!\033[0m\n", targetSess, targetGroup)
+
+	default:
+		fmt.Println("Usage: ai-desk group [list|create|delete|move]")
+	}
+}
+
+func printGroupTreeCLI(nodes []*deck.GroupNode, indent string) {
+	for i, n := range nodes {
+		isLast := i == len(nodes)-1
+		marker := "├──"
+		subIndent := indent + "│   "
+		if isLast {
+			marker = "└──"
+			subIndent = indent + "    "
+		}
+
+		fmt.Printf("%s%s \033[1;34m%s\033[0m \033[90m(%d tasks)\033[0m\n", indent, marker, n.Name, n.TotalTasks)
+
+		for _, s := range n.Sessions {
+			statusColor := "\033[32m"
+			if s.Status == "error" {
+				statusColor = "\033[31m"
+			} else if s.Status == "waiting" {
+				statusColor = "\033[33m"
+			}
+			fmt.Printf("%s    • %-24s \033[90m[%s]\033[0m %s[%s]\033[0m\n", subIndent, s.Title, s.Tool, statusColor, s.Status)
+		}
+
+		if len(n.Children) > 0 {
+			printGroupTreeCLI(n.Children, subIndent)
+		}
 	}
 }
 
@@ -409,6 +600,8 @@ func main() {
 		cmdSkills(subArgs)
 	case "rtk":
 		cmdRTK(subArgs)
+	case "group":
+		cmdGroup(subArgs)
 	case "session":
 		cmdSession(subArgs)
 	case "providers":

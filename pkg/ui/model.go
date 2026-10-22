@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/falluba/ai-desk/pkg/deck"
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
@@ -32,7 +33,23 @@ type Model struct {
 	selectedProvider int
 	activeAccount    string
 
-	// Skills Manager
+	// Hierarchical Groups & Tree
+	sdb             *deck.StateDB
+	treeRoots       []*deck.GroupNode
+	treeItems       []deck.TreeItem
+	selectedTreeIdx int
+
+	// Session Inspector Screen
+	showInspector     bool
+	currentInspection *deck.SessionInspection
+
+	// Cascade Delete Dialog
+	showDeleteDialog bool
+	deletePrompt     string
+	deleteIsGroup    bool
+	deleteTarget     string
+
+	// Skills Manager Overlay
 	showSkillsOverlay bool
 	skillsConfig      *harness.SkillProfilesConfig
 	selectedProfile   int
@@ -87,6 +104,18 @@ func (m *Model) reload() {
 	accounts, _ := m.sb.LoadAccounts()
 	m.accounts = accounts
 
+	// Load hierarchical tree from state.db
+	if sdb, err := deck.OpenStateDB(""); err == nil {
+		m.sdb = sdb
+		groups, _ := sdb.LoadGroups()
+		instances, _ := sdb.LoadInstances()
+		m.treeRoots = deck.BuildGroupTree(groups, instances)
+		m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
+	}
+
+	if m.selectedTreeIdx >= len(m.treeItems) && len(m.treeItems) > 0 {
+		m.selectedTreeIdx = len(m.treeItems) - 1
+	}
 	if m.selectedSession >= len(m.sessions) && len(m.sessions) > 0 {
 		m.selectedSession = len(m.sessions) - 1
 	}
@@ -114,7 +143,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+
+		// 1. Handle Delete Confirmation Dialog
+		if m.showDeleteDialog {
+			switch key {
+			case "y", "Y":
+				m.showDeleteDialog = false
+				if m.deleteIsGroup {
+					if m.sdb != nil {
+						deleted, err := m.sdb.DeleteGroupCascade(m.deleteTarget)
+						if err != nil {
+							m.setToast(fmt.Sprintf("Cascade delete failed: %v", err))
+						} else {
+							m.setToast(fmt.Sprintf("✓ Group %q and all %d tasks deleted.", m.deleteTarget, len(deleted)))
+							m.reload()
+						}
+					}
+				} else {
+					_ = exec.Command("agent-deck", "session", "remove", "--force", m.deleteTarget).Run()
+					m.setToast("✓ Session removed.")
+					m.reload()
+				}
+				return m, nil
+
+			case "n", "N", "esc", "q":
+				m.showDeleteDialog = false
+				m.setToast("Deletion cancelled.")
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// 2. Handle Session Inspector Modal
+		if m.showInspector {
+			switch key {
+			case "esc", "i", "q":
+				m.showInspector = false
+				return m, nil
+			case "enter", "a":
+				if m.currentInspection != nil && m.currentInspection.Instance.TmuxSession != "" {
+					m.showInspector = false
+					c := exec.Command("tmux", "attach-session", "-t", m.currentInspection.Instance.TmuxSession)
+					return m, tea.ExecProcess(c, func(err error) tea.Msg {
+						return attachFinishedMsg{err: err}
+					})
+				}
+			}
+			return m, nil
+		}
+
+		// 3. Global Shortcuts
+		switch key {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
@@ -124,6 +204,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setToast("Skills Manager opened.")
 			} else {
 				m.setToast("Skills Manager closed.")
+			}
+			return m, nil
+
+		case "i":
+			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+				item := m.treeItems[m.selectedTreeIdx]
+				if !item.IsGroup && item.Session != nil {
+					if m.sdb != nil {
+						insp, err := m.sdb.InspectSession(item.Session.ID)
+						if err == nil {
+							m.currentInspection = insp
+							m.showInspector = true
+							return m, nil
+						}
+					}
+				} else if item.IsGroup && item.GroupNode != nil {
+					m.setToast(fmt.Sprintf("Group %q (%d tasks). Space to expand/collapse.", item.GroupNode.Path, item.GroupNode.TotalTasks))
+				}
+			}
+			return m, nil
+
+		case "d":
+			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+				item := m.treeItems[m.selectedTreeIdx]
+				if item.IsGroup && item.GroupNode != nil {
+					m.showDeleteDialog = true
+					m.deleteIsGroup = true
+					m.deleteTarget = item.GroupNode.Path
+					m.deletePrompt = fmt.Sprintf("Cascade delete group %q and ALL %d sessions inside it?", item.GroupNode.Path, item.GroupNode.TotalTasks)
+				} else if !item.IsGroup && item.Session != nil {
+					m.showDeleteDialog = true
+					m.deleteIsGroup = false
+					m.deleteTarget = item.Session.ID
+					m.deletePrompt = fmt.Sprintf("Delete session %q [%s]?", item.Session.Title, item.Session.ID)
+				}
 			}
 			return m, nil
 
@@ -143,7 +258,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedProfile--
 				}
 			} else if m.focus == FocusSessions {
-				if m.selectedSession > 0 {
+				if len(m.treeItems) > 0 {
+					if m.selectedTreeIdx > 0 {
+						m.selectedTreeIdx--
+					}
+				} else if m.selectedSession > 0 {
 					m.selectedSession--
 				}
 			} else {
@@ -159,7 +278,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedProfile++
 				}
 			} else if m.focus == FocusSessions {
-				if m.selectedSession < len(m.sessions)-1 {
+				if len(m.treeItems) > 0 {
+					if m.selectedTreeIdx < len(m.treeItems)-1 {
+						m.selectedTreeIdx++
+					}
+				} else if m.selectedSession < len(m.sessions)-1 {
 					m.selectedSession++
 				}
 			} else {
@@ -169,9 +292,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case " ":
+			// Toggle expand/collapse on group
+			if m.focus == FocusSessions && len(m.treeItems) > 0 {
+				item := m.treeItems[m.selectedTreeIdx]
+				if item.IsGroup && item.GroupNode != nil {
+					item.GroupNode.Expanded = !item.GroupNode.Expanded
+					m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
+					if m.selectedTreeIdx >= len(m.treeItems) {
+						m.selectedTreeIdx = len(m.treeItems) - 1
+					}
+				}
+			}
+			return m, nil
+
 		case "r":
 			m.reload()
-			m.setToast("Quota & sessions refreshed.")
+			m.setToast("State, tree & quota refreshed.")
 			return m, nil
 
 		case "enter":
@@ -182,12 +319,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.focus == FocusSessions && len(m.sessions) > 0 {
-				sess := m.sessions[m.selectedSession]
-				c := exec.Command("tmux", "attach-session", "-t", sess.ID)
-				return m, tea.ExecProcess(c, func(err error) tea.Msg {
-					return attachFinishedMsg{err: err}
-				})
+
+			if m.focus == FocusSessions {
+				if len(m.treeItems) > 0 {
+					item := m.treeItems[m.selectedTreeIdx]
+					if item.IsGroup && item.GroupNode != nil {
+						// Toggle expand/collapse
+						item.GroupNode.Expanded = !item.GroupNode.Expanded
+						m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
+						if m.selectedTreeIdx >= len(m.treeItems) {
+							m.selectedTreeIdx = len(m.treeItems) - 1
+						}
+						return m, nil
+					} else if !item.IsGroup && item.Session != nil {
+						sessName := item.Session.TmuxSession
+						if sessName == "" {
+							sessName = item.Session.ID
+						}
+						c := exec.Command("tmux", "attach-session", "-t", sessName)
+						return m, tea.ExecProcess(c, func(err error) tea.Msg {
+							return attachFinishedMsg{err: err}
+						})
+					}
+				} else if len(m.sessions) > 0 {
+					sess := m.sessions[m.selectedSession]
+					c := exec.Command("tmux", "attach-session", "-t", sess.ID)
+					return m, tea.ExecProcess(c, func(err error) tea.Msg {
+						return attachFinishedMsg{err: err}
+					})
+				}
 			} else if m.focus == FocusAccounts && len(m.accounts) > 0 {
 				acc := m.accounts[m.selectedAccount]
 				m.activeAccount = acc.Email
@@ -226,7 +386,11 @@ func (m Model) View() string {
 	}
 
 	var mainContent string
-	if m.showSkillsOverlay {
+	if m.showDeleteDialog {
+		mainContent = m.renderDeleteDialog(m.width-4, contentHeight)
+	} else if m.showInspector && m.currentInspection != nil {
+		mainContent = RenderInspectorView(m.currentInspection, m.width-4, contentHeight)
+	} else if m.showSkillsOverlay {
 		mainContent = m.renderSkillsOverlay(m.width-4, contentHeight)
 	} else {
 		leftWidth := (m.width * 55) / 100
@@ -255,7 +419,7 @@ func (m Model) renderHeader() string {
 	if rtkClient.IsInstalled() {
 		rtkBadge = lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("[RTK: Active]")
 	}
-	title := titleStyle.Render("AI DESK") + badgeStyle.Render("v0.1.0") + " " + rtkBadge
+	title := titleStyle.Render("AI DESK") + badgeStyle.Render("v0.2.0") + " " + rtkBadge
 	activeInfo := ""
 	if m.activeAccount != "" {
 		activeInfo = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("Active: " + m.activeAccount)
@@ -282,13 +446,57 @@ func (m Model) renderSessionsPane(width, height int) string {
 		bStyle = activeBorder
 	}
 
-	title := "Active Tmux Sessions (" + strconvItoa(len(m.sessions)) + ")"
+	totalCount := len(m.treeItems)
+	title := fmt.Sprintf("Sessions & Hierarchy (%d items)", totalCount)
 	var lines []string
 
-	if len(m.sessions) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("No active tmux sessions found."))
+	if len(m.treeItems) == 0 && len(m.sessions) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("No active groups or sessions found."))
 		lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Spawn one with: ai-desk run <tool>"))
+	} else if len(m.treeItems) > 0 {
+		// Render hierarchical tree
+		for i, item := range m.treeItems {
+			indent := strings.Repeat("  ", item.Depth)
+			isSelected := i == m.selectedTreeIdx && m.focus == FocusSessions
+
+			if item.IsGroup && item.GroupNode != nil {
+				prefix := "▼ "
+				if !item.GroupNode.Expanded {
+					prefix = "▶ "
+				}
+				rowText := fmt.Sprintf("%s%s%s (%d)", indent, prefix, item.GroupNode.Name, item.GroupNode.TotalTasks)
+				styledRow := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f59e0b")).Render(rowText)
+				if isSelected {
+					lines = append(lines, selectedRow.Width(width-4).Render("▶ "+rowText))
+				} else {
+					lines = append(lines, normalRow.Render("  "+styledRow))
+				}
+			} else if !item.IsGroup && item.Session != nil {
+				statusBullet := "●"
+				bulletColor := subtleColor
+				switch item.Session.Status {
+				case "running":
+					bulletColor = successColor
+				case "waiting":
+					bulletColor = warningColor
+				case "error":
+					bulletColor = errorColor
+				}
+
+				bullet := lipgloss.NewStyle().Foreground(bulletColor).Render(statusBullet)
+				toolBadge := lipgloss.NewStyle().Foreground(subtleColor).Render("[" + item.Session.Tool + "]")
+				titleStr := truncateString(item.Session.Title, width-item.Depth*2-26)
+				rowContent := fmt.Sprintf("%s%s %-18s %s", indent, bullet, titleStr, toolBadge)
+
+				if isSelected {
+					lines = append(lines, selectedRow.Width(width-4).Render("▶ "+rowContent))
+				} else {
+					lines = append(lines, normalRow.Render("  "+rowContent))
+				}
+			}
+		}
 	} else {
+		// Fallback to flat tmux sessions
 		for i, s := range m.sessions {
 			badge := lipgloss.NewStyle().Foreground(subtleColor).Render("[IDLE]")
 			if s.Attached {
@@ -310,6 +518,28 @@ func (m Model) renderSessionsPane(width, height int) string {
 	return bStyle.Width(width).Height(height).Render(
 		lipgloss.JoinVertical(lipgloss.Left, headerStyle.Render(title), body),
 	)
+}
+
+func (m Model) renderDeleteDialog(width, height int) string {
+	bStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(errorColor).
+		Padding(1, 2)
+
+	var lines []string
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(errorColor).Render("⚠ CONFIRM CASCADE DELETION"))
+	lines = append(lines, "")
+	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(m.deletePrompt))
+	lines = append(lines, "")
+	if m.deleteIsGroup {
+		lines = append(lines, lipgloss.NewStyle().Foreground(warningColor).Render("This will terminate all running tmux processes and delete all tasks in this group and all its subgroups."))
+	} else {
+		lines = append(lines, lipgloss.NewStyle().Foreground(warningColor).Render("This will terminate the session's tmux process and remove it from the registry."))
+	}
+	lines = append(lines, "")
+	lines = append(lines, lipgloss.NewStyle().Bold(true).Render("[y] Confirm & Delete   •   [n/Esc] Cancel"))
+
+	return bStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderAccountsPane(width, height int) string {
@@ -423,49 +653,65 @@ func (m Model) renderProgressBar(pct float64, width int) string {
 	if filled < 0 {
 		filled = 0
 	}
-	barStr := strings.Repeat("█", filled)
-	emptyStr := strings.Repeat("░", width-filled)
+	empty := width - filled
 
-	fillStyled := meterFillGreen.Render(barStr)
-	if pct <= 40 && pct > 15 {
-		fillStyled = meterFillYellow.Render(barStr)
-	} else if pct <= 15 {
-		fillStyled = meterFillRed.Render(barStr)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	color := successColor
+	if pct < 20.0 {
+		color = errorColor
+	} else if pct < 50.0 {
+		color = warningColor
 	}
-
-	return fillStyled + meterEmpty.Render(emptyStr)
+	return lipgloss.NewStyle().Foreground(color).Render(bar)
 }
 
 func (m Model) renderFooter() string {
-	keys := []string{
-		helpKeyStyle.Render("Tab") + " " + helpDescStyle.Render("Switch Pane"),
-		helpKeyStyle.Render("↑/↓") + " " + helpDescStyle.Render("Navigate"),
-		helpKeyStyle.Render("Enter") + " " + helpDescStyle.Render("Attach/Select"),
-		helpKeyStyle.Render("s") + " " + helpDescStyle.Render("Skills Manager"),
-		helpKeyStyle.Render("r") + " " + helpDescStyle.Render("Refresh"),
-		helpKeyStyle.Render("q") + " " + helpDescStyle.Render("Quit"),
-	}
-	if m.showSkillsOverlay {
+	var keys []string
+
+	if m.showInspector {
+		keys = []string{
+			helpKeyStyle.Render("Esc/i") + " " + helpDescStyle.Render("Close Inspector"),
+			helpKeyStyle.Render("Enter/a") + " " + helpDescStyle.Render("Attach Tmux"),
+			helpKeyStyle.Render("s") + " " + helpDescStyle.Render("Skills"),
+			helpKeyStyle.Render("q") + " " + helpDescStyle.Render("Quit"),
+		}
+	} else if m.showDeleteDialog {
+		keys = []string{
+			helpKeyStyle.Render("y") + " " + helpDescStyle.Render("Confirm Cascade Delete"),
+			helpKeyStyle.Render("n/Esc") + " " + helpDescStyle.Render("Cancel"),
+		}
+	} else if m.showSkillsOverlay {
 		keys = []string{
 			helpKeyStyle.Render("s") + " " + helpDescStyle.Render("Close Skills Manager"),
 			helpKeyStyle.Render("↑/↓") + " " + helpDescStyle.Render("Navigate Profiles"),
 			helpKeyStyle.Render("Enter") + " " + helpDescStyle.Render("Select Default"),
 			helpKeyStyle.Render("q") + " " + helpDescStyle.Render("Quit"),
 		}
+	} else {
+		keys = []string{
+			helpKeyStyle.Render("Tab") + " " + helpDescStyle.Render("Switch Pane"),
+			helpKeyStyle.Render("↑/↓") + " " + helpDescStyle.Render("Navigate"),
+			helpKeyStyle.Render("Space") + " " + helpDescStyle.Render("Expand/Collapse"),
+			helpKeyStyle.Render("Enter") + " " + helpDescStyle.Render("Attach/Toggle"),
+			helpKeyStyle.Render("i") + " " + helpDescStyle.Render("Inspect Session"),
+			helpKeyStyle.Render("d") + " " + helpDescStyle.Render("Delete Group/Task"),
+			helpKeyStyle.Render("s") + " " + helpDescStyle.Render("Skills"),
+			helpKeyStyle.Render("r") + " " + helpDescStyle.Render("Refresh"),
+			helpKeyStyle.Render("q") + " " + helpDescStyle.Render("Quit"),
+		}
 	}
 	return lipgloss.NewStyle().MarginTop(1).Render(strings.Join(keys, "   •   "))
 }
 
-func truncateString(s string, max int) string {
-	if max <= 3 {
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	if len(s) <= maxLen {
 		return s
 	}
-	if len(s) > max {
-		return s[:max-3] + "..."
+	if maxLen <= 3 {
+		return s[:maxLen]
 	}
-	return s
-}
-
-func strconvItoa(n int) string {
-	return fmt.Sprintf("%d", n)
+	return s[:maxLen-3] + "..."
 }
