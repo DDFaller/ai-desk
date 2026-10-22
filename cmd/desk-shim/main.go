@@ -14,6 +14,7 @@ import (
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
+	"github.com/falluba/ai-desk/pkg/rtk"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
 )
 
@@ -112,8 +113,16 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s] (skills: %s [%d skills])...\n",
-		tool, currentID, activeProfile, len(activeSkills))
+	rtkInfo := ""
+	rtkClient := rtk.NewClient()
+	if rtkClient.IsInstalled() {
+		if ver, err := rtkClient.Version(); err == nil {
+			rtkInfo = fmt.Sprintf(" | \033[1;32mRTK: active (%s)\033[0m", ver)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s] (skills: %s [%d skills]%s)...\n",
+		tool, currentID, activeProfile, len(activeSkills), rtkInfo)
 
 	code, out, runErr := runCommand(tool, toolArgs, currentEnv)
 

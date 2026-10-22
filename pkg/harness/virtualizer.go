@@ -89,6 +89,9 @@ func (v *Virtualizer) PrepareSandboxWithSkills(tool, accountID string, skillName
 		}
 	}
 
+	// Project RTK (Rust Token Killer) hooks and configurations for token optimization
+	v.projectRTK(tool, sandbox)
+
 	env := make(map[string]string)
 	switch tool {
 	case "claude":
@@ -155,6 +158,53 @@ func (v *Virtualizer) ListAttachedSkills(tool, accountID string) ([]string, erro
 func (v *Virtualizer) ensureSymlink(target, linkPath string) {
 	if _, lerr := os.Lstat(linkPath); os.IsNotExist(lerr) {
 		_ = os.Symlink(target, linkPath)
+	}
+}
+
+// projectRTK projects global RTK (Rust Token Killer) hooks and configurations
+// into the isolated harness sandbox, ensuring transparent terminal token reduction.
+func (v *Virtualizer) projectRTK(tool, sandbox string) {
+	home, _ := os.UserHomeDir()
+	switch tool {
+	case "claude":
+		srcRTK := filepath.Join(home, ".claude", "RTK.md")
+		if _, err := os.Stat(srcRTK); err == nil {
+			v.ensureSymlink(srcRTK, filepath.Join(sandbox, "RTK.md"))
+		}
+		srcSettings := filepath.Join(home, ".claude", "settings.json")
+		if _, err := os.Stat(srcSettings); err == nil {
+			v.ensureSymlink(srcSettings, filepath.Join(sandbox, "settings.json"))
+		}
+
+	case "agy", "gemini":
+		srcHooks := filepath.Join(home, ".gemini", "hooks")
+		if _, err := os.Stat(srcHooks); err == nil {
+			v.ensureSymlink(srcHooks, filepath.Join(sandbox, "hooks"))
+		}
+		srcMD := filepath.Join(home, ".gemini", "GEMINI.md")
+		if _, err := os.Stat(srcMD); err == nil {
+			v.ensureSymlink(srcMD, filepath.Join(sandbox, "GEMINI.md"))
+		}
+		srcSettings := filepath.Join(home, ".gemini", "settings.json")
+		if _, err := os.Stat(srcSettings); err == nil {
+			v.ensureSymlink(srcSettings, filepath.Join(sandbox, "settings.json"))
+		}
+
+	case "codex":
+		srcHooks := filepath.Join(home, ".codex", "hooks.json")
+		if _, err := os.Stat(srcHooks); err == nil {
+			v.ensureSymlink(srcHooks, filepath.Join(sandbox, "hooks.json"))
+		}
+		srcRTK := filepath.Join(home, ".codex", "RTK.md")
+		if _, err := os.Stat(srcRTK); err == nil {
+			v.ensureSymlink(srcRTK, filepath.Join(sandbox, "RTK.md"))
+		}
+
+	case "opencode":
+		srcPlugins := filepath.Join(home, ".config", "opencode", "plugins")
+		if _, err := os.Stat(srcPlugins); err == nil {
+			v.ensureSymlink(srcPlugins, filepath.Join(sandbox, "plugins"))
+		}
 	}
 }
 

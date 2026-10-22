@@ -1,11 +1,19 @@
 BIN_DIR := bin
 GO := go
 
-.PHONY: all build build-submodules test test-failover sync-upstream install clean
+.PHONY: all build build-submodules check-deps install-rtk test test-failover sync-upstream install clean
 
-all: build build-submodules
+all: check-deps build build-submodules
 
-build:
+check-deps:
+	@which rtk >/dev/null 2>&1 || (echo "--> rtk not found. Installing RTK (Rust Token Killer)..." && $(MAKE) install-rtk)
+
+install-rtk:
+	@echo "--> Fetching and installing latest RTK (Rust Token Killer)..."
+	@curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | bash
+	@echo "✓ RTK installed to ~/.local/bin/rtk"
+
+build: check-deps
 	@mkdir -p $(BIN_DIR)
 	@echo "--> Building ai-desk..."
 	@$(GO) build -trimpath -ldflags "-s -w" -o $(BIN_DIR)/ai-desk ./cmd/ai-desk

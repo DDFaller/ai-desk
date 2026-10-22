@@ -11,6 +11,7 @@ import (
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
+	"github.com/falluba/ai-desk/pkg/rtk"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
 )
 
@@ -249,7 +250,12 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	title := titleStyle.Render("AI DESK") + badgeStyle.Render("v0.1.0")
+	rtkBadge := lipgloss.NewStyle().Foreground(subtleColor).Render("[RTK: -]")
+	rtkClient := rtk.NewClient()
+	if rtkClient.IsInstalled() {
+		rtkBadge = lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("[RTK: Active]")
+	}
+	title := titleStyle.Render("AI DESK") + badgeStyle.Render("v0.1.0") + " " + rtkBadge
 	activeInfo := ""
 	if m.activeAccount != "" {
 		activeInfo = lipgloss.NewStyle().Foreground(accentColor).Bold(true).Render("Active: " + m.activeAccount)
@@ -347,6 +353,22 @@ func (m Model) renderAccountsPane(width, height int) string {
 			row := fmt.Sprintf("• %-12s %s", p.Name, lipgloss.NewStyle().Foreground(subtleColor).Render(endpoint))
 			sections = append(sections, normalRow.Render(row))
 		}
+	}
+
+	// RTK Token Optimization Section
+	sections = append(sections, "\n"+headerStyle.Render("RTK Token Saver (Rust Token Killer)"))
+	rtkClient := rtk.NewClient()
+	if rtkClient.IsInstalled() {
+		ver, _ := rtkClient.Version()
+		statusLine := fmt.Sprintf("• Status: %s (%s)", lipgloss.NewStyle().Foreground(successColor).Bold(true).Render("Active"), ver)
+		sections = append(sections, normalRow.Render(statusLine))
+		if savings, err := rtkClient.GetSavings(); err == nil && savings.TotalCommands > 0 {
+			statLine := fmt.Sprintf("• Commands: %d | Saved: %d tokens (%.1f%%)",
+				savings.TotalCommands, savings.TotalSaved, savings.AvgSavingsPct*100)
+			sections = append(sections, normalRow.Render(statLine))
+		}
+	} else {
+		sections = append(sections, normalRow.Render("• Status: Not installed (make install-rtk)"))
 	}
 
 	body := strings.Join(sections, "\n")

@@ -12,6 +12,7 @@ import (
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
+	"github.com/falluba/ai-desk/pkg/rtk"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
 	"github.com/falluba/ai-desk/pkg/ui"
 )
@@ -31,6 +32,8 @@ func printHelp() {
 	fmt.Println("                      Options: --skills <profile> (auto, minimal, core, web, video, career, all)")
 	fmt.Println("  skills [action]     Manage skill profiles & conscious runtime attachment")
 	fmt.Println("                      Actions: list, audit, attach <tool> <acc> <skill>, detach <tool> <acc> <skill>")
+	fmt.Println("  rtk [action]        Inspect RTK token savings dashboard or initialize harness hooks")
+	fmt.Println("                      Actions: gain (default), init, config")
 	fmt.Println("  session [action]    Manage tmux agent sessions (list, attach, new)")
 	fmt.Println("  providers [list]    Manage and inspect custom LLM providers (Ollama, OpenRouter, etc.)")
 	fmt.Println("  sync                Fetch upstream updates for agent-deck and agy-swap submodules")
@@ -75,6 +78,23 @@ func cmdStatus() {
 		for id, rec := range cooldowns {
 			fmt.Printf("  ⚠ %s in cooldown until %s (reason: %s)\n", id, rec.Until.Format("15:04:05"), rec.Reason)
 		}
+	}
+
+	rtkClient := rtk.NewClient()
+	fmt.Println("\n\033[1mRTK Token Saver (Rust Token Killer):\033[0m")
+	if rtkClient.IsInstalled() {
+		ver, _ := rtkClient.Version()
+		savings, sErr := rtkClient.GetSavings()
+		if sErr == nil {
+			fmt.Printf("  • Status:       \033[1;32mActive\033[0m (%s)\n", ver)
+			fmt.Printf("  • Interceptions: %d commands\n", savings.TotalCommands)
+			fmt.Printf("  • Tokens Saved:  \033[1;36m%d tokens\033[0m (saved %.1f%% of raw terminal output)\n",
+				savings.TotalSaved, savings.AvgSavingsPct*100)
+		} else {
+			fmt.Printf("  • Status:       \033[1;32mActive\033[0m (%s)\n", ver)
+		}
+	} else {
+		fmt.Println("  • Status: \033[1;33mNot Installed\033[0m (Run `make install-rtk` to install RTK for 60-90% token reduction)")
 	}
 
 	fmt.Println("\n\033[1mActive Tmux Sessions:\033[0m")
@@ -231,6 +251,45 @@ func cmdSkills(args []string) {
 	}
 }
 
+func cmdRTK(args []string) {
+	rtkClient := rtk.NewClient()
+	if !rtkClient.IsInstalled() {
+		fmt.Fprintln(os.Stderr, "RTK (Rust Token Killer) is not installed.")
+		fmt.Fprintln(os.Stderr, "Install it with: make install-rtk")
+		return
+	}
+
+	action := "status"
+	if len(args) > 0 {
+		action = args[0]
+	}
+
+	switch action {
+	case "status", "gain":
+		c := exec.Command(rtkClient.BinPath(), "gain")
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		_ = c.Run()
+
+	case "init":
+		fmt.Println("Configuring RTK global hooks across AI harnesses (Claude, Gemini, Codex, OpenCode)...")
+		if err := rtkClient.InitHarnessHooks(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing hooks: %v\n", err)
+			return
+		}
+		fmt.Println("✓ RTK hooks initialized across all harnesses!")
+
+	case "config":
+		c := exec.Command(rtkClient.BinPath(), "config")
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		_ = c.Run()
+
+	default:
+		fmt.Printf("Usage: ai-desk rtk [gain|init|config]\n")
+	}
+}
+
 func cmdProviders(args []string) {
 	reg, err := providers.Load("")
 	if err != nil {
@@ -348,6 +407,8 @@ func main() {
 		cmdRun(subArgs)
 	case "skills":
 		cmdSkills(subArgs)
+	case "rtk":
+		cmdRTK(subArgs)
 	case "session":
 		cmdSession(subArgs)
 	case "providers":

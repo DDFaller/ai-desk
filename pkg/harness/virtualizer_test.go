@@ -53,4 +53,13 @@ func TestVirtualizer_PrepareSandbox(t *testing.T) {
 	if _, err := os.Stat(tokenFile); err != nil {
 		t.Errorf("expected token file to exist at %s", tokenFile)
 	}
+
+	// Verify RTK projection for Claude
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat(filepath.Join(home, ".claude", "RTK.md")); err == nil {
+		projectedRTK := filepath.Join(expectedClaudeDir, "RTK.md")
+		if _, err := os.Lstat(projectedRTK); err != nil {
+			t.Errorf("expected RTK.md projected in claude sandbox: %v", err)
+		}
+	}
 }
