@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
@@ -26,7 +27,10 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  tui, ui             Launch the interactive terminal user interface")
 	fmt.Println("  status              Show all saved accounts, quota meters, providers, and sessions")
-	fmt.Println("  run <tool> [args]   Launch an AI CLI wrapped with per-session sandboxing & auto-rotation")
+	fmt.Println("  run [opts] <tool>   Launch an AI CLI with scoped skills & auto-rotation")
+	fmt.Println("                      Options: --skills <profile> (minimal, core, web, video, career, all)")
+	fmt.Println("  skills [action]     Manage skill profiles & conscious runtime attachment")
+	fmt.Println("                      Actions: list, attach <tool> <acc> <skill>, detach <tool> <acc> <skill>")
 	fmt.Println("  session [action]    Manage tmux agent sessions (list, attach, new)")
 	fmt.Println("  providers [list]    Manage and inspect custom LLM providers (Ollama, OpenRouter, etc.)")
 	fmt.Println("  sync                Fetch upstream updates for agent-deck and agy-swap submodules")
@@ -105,17 +109,27 @@ func renderProgressBar(pct float64) string {
 
 func cmdRun(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: ai-desk run <tool> [args...]")
+		fmt.Println("Usage: ai-desk run [--skills <profile>] <tool> [args...]")
 		os.Exit(1)
 	}
 
-	// Delegate to desk-shim
+	// Parse optional --skills flag
+	shimArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--skills" && i+1 < len(args) {
+			shimArgs = append(shimArgs, "-skills", args[i+1])
+			i++
+		} else {
+			shimArgs = append(shimArgs, args[i])
+		}
+	}
+
 	shimPath, err := exec.LookPath("desk-shim")
 	if err != nil {
 		shimPath = "./bin/desk-shim"
 	}
 
-	cmd := exec.Command(shimPath, args...)
+	cmd := exec.Command(shimPath, shimArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -124,6 +138,71 @@ func cmdRun(args []string) {
 			os.Exit(exitErr.ExitCode())
 		}
 		os.Exit(1)
+	}
+}
+
+func cmdSkills(args []string) {
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+
+	v := harness.NewVirtualizer("", "")
+	cfg, err := harness.LoadSkillProfiles("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading skill profiles: %v\n", err)
+		os.Exit(1)
+	}
+
+	switch sub {
+	case "list":
+		fmt.Println("\n\033[1;36m=== AI Desk Skill Profiles (~/.ai-desk/skill-profiles.yaml) ===\033[0m")
+		for name, p := range cfg.Profiles {
+			skills, _ := cfg.ResolveSkills(name, "")
+			count := len(skills)
+			estTokens := count * 60
+			if count == 76 {
+				estTokens = 4500
+			}
+			fmt.Printf("\n\033[1m[%s]\033[0m  %s\n", name, p.Description)
+			fmt.Printf("  • Skills: %d skills (~%d prompt tokens/turn)\n", count, estTokens)
+			if count <= 15 {
+				fmt.Printf("  • Included: %s\n", strings.Join(skills, ", "))
+			} else {
+				fmt.Printf("  • Included: %s, ... (%d more)\n", strings.Join(skills[:10], ", "), count-10)
+			}
+		}
+		fmt.Println()
+
+	case "attach":
+		if len(args) < 4 {
+			fmt.Println("Usage: ai-desk skills attach <tool> <account_id> <skill_name>")
+			fmt.Println("Example: ai-desk skills attach claude default shadcn")
+			return
+		}
+		tool := args[1]
+		acc := args[2]
+		skill := args[3]
+		if err := v.AttachSkill(tool, acc, skill); err != nil {
+			fmt.Printf("\033[31mError attaching skill:\033[0m %v\n", err)
+			return
+		}
+		fmt.Printf("\033[32m✓ Skill %q attached successfully to %s/%s sandbox!\033[0m\n", skill, tool, acc)
+		fmt.Printf("  Location: %s/skills/%s\n", v.SandboxPath(tool, acc), skill)
+
+	case "detach":
+		if len(args) < 4 {
+			fmt.Println("Usage: ai-desk skills detach <tool> <account_id> <skill_name>")
+			return
+		}
+		tool := args[1]
+		acc := args[2]
+		skill := args[3]
+		if err := v.DetachSkill(tool, acc, skill); err != nil {
+			fmt.Printf("\033[31mError detaching skill:\033[0m %v\n", err)
+			return
+		}
+		fmt.Printf("\033[32m✓ Skill %q detached from %s/%s sandbox.\033[0m\n", skill, tool, acc)
 	}
 }
 
@@ -242,6 +321,8 @@ func main() {
 		cmdStatus()
 	case "run":
 		cmdRun(subArgs)
+	case "skills":
+		cmdSkills(subArgs)
 	case "session":
 		cmdSession(subArgs)
 	case "providers":

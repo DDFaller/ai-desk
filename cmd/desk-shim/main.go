@@ -56,6 +56,7 @@ func runCommand(tool string, args []string, env map[string]string) (int, string,
 
 func main() {
 	profileFlag := flag.String("profile", "default", "Account or provider profile")
+	skillsFlag := flag.String("skills", "core", "Skill profile (minimal, core, web, video, career, all)")
 	providerFlag := flag.String("provider", "", "Custom provider name from providers.yaml")
 	noResumeFlag := flag.Bool("no-resume", false, "Disable automatic --resume on rate limit failover")
 	flag.Parse()
@@ -76,6 +77,10 @@ func main() {
 	reg, _ := providers.Load("")
 	translator := providers.NewTranslator()
 
+	// Load skill profile definitions
+	skillsCfg, _ := harness.LoadSkillProfiles("")
+	activeSkills, _ := skillsCfg.ResolveSkills(*skillsFlag, "")
+
 	// Load accounts
 	accounts, _ := sb.LoadAccounts()
 	engine := rotation.NewEngine(nil)
@@ -94,7 +99,7 @@ func main() {
 		selected, selErr := engine.SelectNext(accounts, rotation.PolicySticky, currentID)
 		if selErr == nil {
 			currentID = selected.ID
-			currentEnv, err = v.PrepareSandbox(tool, currentID)
+			currentEnv, err = v.PrepareSandboxWithSkills(tool, currentID, activeSkills)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[AI-DESK] Warning: prepare sandbox: %v\n", err)
 			}
@@ -103,7 +108,8 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s]...\n", tool, currentID)
+	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s] (skills: %s [%d skills])...\n",
+		tool, currentID, *skillsFlag, len(activeSkills))
 
 	code, out, runErr := runCommand(tool, toolArgs, currentEnv)
 
@@ -113,7 +119,7 @@ func main() {
 		nextAcc, failErr := engine.Failover(accounts, currentID, 30*time.Minute, rotation.PolicyBalanced)
 		if failErr == nil {
 			fmt.Fprintf(os.Stderr, "\033[1;32m[AI-DESK] Seamlessly rotating to next healthy account: %s (remaining: %.1f%%)\033[0m\n", nextAcc.Email, nextAcc.RemainingQuotaPct)
-			newEnv, _ := v.PrepareSandbox(tool, nextAcc.ID)
+			newEnv, _ := v.PrepareSandboxWithSkills(tool, nextAcc.ID, activeSkills)
 			token, _ := sb.ReadAccountToken(nextAcc.Email)
 			_ = v.WriteAgyToken(nextAcc.ID, token, nextAcc.Email)
 
