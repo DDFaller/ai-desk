@@ -1,0 +1,9 @@
+[submodule "submodules/agent-deck"]
+	path = submodules/agent-deck
+	url = https://github.com/asheshgoplani/agent-deck.git
+	branch = main
+
+[submodule "submodules/agy-swap"]
+	path = submodules/agy-swap
+	url = https://github.com/aklkbqx/agy-swap.git
+	branch = main
