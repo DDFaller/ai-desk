@@ -28,9 +28,9 @@ func printHelp() {
 	fmt.Println("  tui, ui             Launch the interactive terminal user interface")
 	fmt.Println("  status              Show all saved accounts, quota meters, providers, and sessions")
 	fmt.Println("  run [opts] <tool>   Launch an AI CLI with scoped skills & auto-rotation")
-	fmt.Println("                      Options: --skills <profile> (minimal, core, web, video, career, all)")
+	fmt.Println("                      Options: --skills <profile> (auto, minimal, core, web, video, career, all)")
 	fmt.Println("  skills [action]     Manage skill profiles & conscious runtime attachment")
-	fmt.Println("                      Actions: list, attach <tool> <acc> <skill>, detach <tool> <acc> <skill>")
+	fmt.Println("                      Actions: list, audit, attach <tool> <acc> <skill>, detach <tool> <acc> <skill>")
 	fmt.Println("  session [action]    Manage tmux agent sessions (list, attach, new)")
 	fmt.Println("  providers [list]    Manage and inspect custom LLM providers (Ollama, OpenRouter, etc.)")
 	fmt.Println("  sync                Fetch upstream updates for agent-deck and agy-swap submodules")
@@ -172,6 +172,31 @@ func cmdSkills(args []string) {
 				fmt.Printf("  • Included: %s, ... (%d more)\n", strings.Join(skills[:10], ", "), count-10)
 			}
 		}
+		fmt.Println()
+
+	case "audit":
+		fmt.Println("\n\033[1;36m=== AI Desk Skill Catalog Audit ===\033[0m")
+		report, err := harness.AuditSkills("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Audit error: %v\n", err)
+			return
+		}
+		fmt.Printf("Total Available Skills:  \033[1m%d skills\033[0m\n", report.TotalSkills)
+		fmt.Printf("Total Full Skill Words:  \033[1m%d words\033[0m (~%d tokens)\n", report.TotalWords, int(float64(report.TotalWords)*1.33))
+		fmt.Printf("Prompt Catalog Tax:      \033[1;31m~%d tokens/turn\033[0m (when unscoped)\n\n", report.CatalogTokenTax)
+
+		fmt.Println("\033[1mSkills Distribution by Domain:\033[0m")
+		for cat, count := range report.CategoryCounts {
+			pct := float64(count) / float64(report.TotalSkills) * 100.0
+			fmt.Printf("  • %-10s  %2d skills  (%4.1f%%)\n", cat, count, pct)
+		}
+
+		fmt.Println("\n\033[1mScoping Optimization Potential:\033[0m")
+		fmt.Println("  • minimal:  ~120 tokens/turn  (saves 97% prompt overhead)")
+		fmt.Println("  • core:     ~240 tokens/turn  (saves 94% prompt overhead)")
+		fmt.Println("  • web:      ~960 tokens/turn  (saves 78% prompt overhead)")
+		fmt.Println("  • video:    ~780 tokens/turn  (saves 82% prompt overhead)")
+		fmt.Println("  • career:  ~1080 tokens/turn  (saves 76% prompt overhead)")
 		fmt.Println()
 
 	case "attach":

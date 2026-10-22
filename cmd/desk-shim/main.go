@@ -56,7 +56,7 @@ func runCommand(tool string, args []string, env map[string]string) (int, string,
 
 func main() {
 	profileFlag := flag.String("profile", "default", "Account or provider profile")
-	skillsFlag := flag.String("skills", "core", "Skill profile (minimal, core, web, video, career, all)")
+	skillsFlag := flag.String("skills", "auto", "Skill profile (auto, minimal, core, web, video, career, all)")
 	providerFlag := flag.String("provider", "", "Custom provider name from providers.yaml")
 	noResumeFlag := flag.Bool("no-resume", false, "Disable automatic --resume on rate limit failover")
 	flag.Parse()
@@ -79,7 +79,11 @@ func main() {
 
 	// Load skill profile definitions
 	skillsCfg, _ := harness.LoadSkillProfiles("")
-	activeSkills, _ := skillsCfg.ResolveSkills(*skillsFlag, "")
+	activeProfile := *skillsFlag
+	if activeProfile == "auto" {
+		activeProfile = harness.DetectWorkspaceProfile("")
+	}
+	activeSkills, _ := skillsCfg.ResolveSkills(activeProfile, "")
 
 	// Load accounts
 	accounts, _ := sb.LoadAccounts()
@@ -109,7 +113,7 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s] (skills: %s [%d skills])...\n",
-		tool, currentID, *skillsFlag, len(activeSkills))
+		tool, currentID, activeProfile, len(activeSkills))
 
 	code, out, runErr := runCommand(tool, toolArgs, currentEnv)
 
