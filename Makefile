@@ -1,5 +1,5 @@
 BIN_DIR := bin
-GO := go
+GO ?= $(shell which go 2>/dev/null || ( [ -f /tmp/go/bin/go ] && echo /tmp/go/bin/go ) || echo go)
 
 .PHONY: all build build-submodules check-deps install-rtk test test-failover sync-upstream install clean
 

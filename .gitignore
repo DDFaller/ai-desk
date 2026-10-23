@@ -3,3 +3,19 @@ dist/
 *.tmp
 *.log
 .DS_Store
+
+# Local runtime & lavish daemon artifacts
+.lavish/
+**/.lavish/
+**/lavish-state/
+*.token
+*.lock
+connection.json
+**/connection.json
+state.json
+**/state.json
+state.previous.json
+**/state.previous.json
+recordings/
+**/recordings/
+

@@ -50,6 +50,19 @@ profiles:
 		t.Fatalf("expected 3 skills for full, got %d", len(allSkills))
 	}
 
+	// 2b. Test multi-profile union resolution ("lean,extra")
+	cfg.Profiles["extra"] = ProfileDefinition{
+		Description: "Extra profile",
+		Skills:      []string{"skill-b"},
+	}
+	combined, err := cfg.ResolveSkills("lean, extra", canonicalSkillsDir)
+	if err != nil {
+		t.Fatalf("resolve multi-profile: %v", err)
+	}
+	if len(combined) != 2 {
+		t.Fatalf("expected 2 skills for lean+extra, got %v", combined)
+	}
+
 	// 3. Test Sandbox creation with lean profile
 	harnessesDir := filepath.Join(tempDir, "harnesses")
 	v := NewVirtualizer(harnessesDir, canonicalSkillsDir)
@@ -79,5 +92,40 @@ profiles:
 	attachedFinal, _ := v.ListAttachedSkills("claude", "test-acc")
 	if len(attachedFinal) != 1 {
 		t.Fatalf("expected 1 attached skill after detach, got %d", len(attachedFinal))
+	}
+
+	// 6. Test pruning when re-preparing sandbox with different skills (e.g. only skill-c)
+	_, err = v.PrepareSandboxWithSkills("claude", "test-acc", []string{"skill-c"})
+	if err != nil {
+		t.Fatalf("prepare sandbox with skill-c: %v", err)
+	}
+	attachedPruned, _ := v.ListAttachedSkills("claude", "test-acc")
+	if len(attachedPruned) != 1 || attachedPruned[0] != "skill-c" {
+		t.Fatalf("expected only [skill-c] after re-scoping, got %v", attachedPruned)
+	}
+
+	// 7. Test legacy symlink cleanup
+	legacyAcc := "legacy-acc"
+	legacyDir := v.SandboxPath("claude", legacyAcc)
+	_ = os.MkdirAll(legacyDir, 0755)
+	legacySkillsSymlink := filepath.Join(legacyDir, "skills")
+	_ = os.Symlink(canonicalSkillsDir, legacySkillsSymlink)
+
+	_, err = v.PrepareSandboxWithSkills("claude", legacyAcc, []string{"skill-b"})
+	if err != nil {
+		t.Fatalf("prepare sandbox on legacy symlink: %v", err)
+	}
+	legacyAttached, _ := v.ListAttachedSkills("claude", legacyAcc)
+	if len(legacyAttached) != 1 || legacyAttached[0] != "skill-b" {
+		t.Fatalf("expected legacy symlink replaced with isolated [skill-b], got %v", legacyAttached)
+	}
+
+	// 8. Test that hidden directories are excluded from ListAllSkillNames
+	_ = os.MkdirAll(filepath.Join(canonicalSkillsDir, ".system"), 0755)
+	names, _ := ListAllSkillNames(canonicalSkillsDir)
+	for _, n := range names {
+		if n == ".system" {
+			t.Fatalf("expected .system to be excluded from ListAllSkillNames, got %v", names)
+		}
 	}
 }

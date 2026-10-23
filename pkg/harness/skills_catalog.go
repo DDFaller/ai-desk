@@ -73,6 +73,27 @@ func defaultProfilesConfig() *SkillProfilesConfig {
 				Description: "Standard developer suite",
 				Skills:      []string{"verification", "react-best-practices", "shadcn", "antigravity-guide"},
 			},
+			"web": {
+				Description: "Vercel, Next.js, and modern fullstack cloud engineering",
+				Skills: []string{
+					"nextjs", "react-best-practices", "shadcn", "ai-sdk", "ai-gateway",
+					"auth", "cdn-caching", "deployments-cicd", "env-vars", "microfrontends",
+					"next-cache-components", "routing-middleware", "runtime-cache", "turbopack",
+					"verification", "workflow",
+				},
+			},
+			"video": {
+				Description: "HyperFrames creative direction, animation, keyframes, and audio",
+				Skills: []string{
+					"hyperframes", "hyperframes-animation", "hyperframes-audio", "hyperframes-cli",
+					"hyperframes-core", "hyperframes-creative", "hyperframes-keyframes", "hyperframes-registry",
+					"hyperframes-studio", "media-use", "product-launch-video", "vox-video-studio", "general-video",
+				},
+			},
+			"backend": {
+				Description: "Backend API and database engineering",
+				Skills:      []string{"verification", "auth", "env-vars", "deployments-cicd", "bootstrap"},
+			},
 			"all": {
 				Description: "Full unrestricted catalog of all 76 skills",
 				Skills:      []string{"*"},
@@ -81,10 +102,36 @@ func defaultProfilesConfig() *SkillProfilesConfig {
 	}
 }
 
-// ResolveSkills resolves the list of skill directory names for a given profile.
+// ResolveSkills resolves the list of skill directory names for a given profile or comma-separated list of profiles.
 func (cfg *SkillProfilesConfig) ResolveSkills(profileName, canonicalSkillsDir string) ([]string, error) {
 	if profileName == "" || profileName == "auto" {
 		profileName = DetectWorkspaceProfile("")
+	}
+
+	// Support comma-separated profiles (e.g. "core,web" or "core, video")
+	if strings.Contains(profileName, ",") {
+		parts := strings.Split(profileName, ",")
+		seen := make(map[string]bool)
+		var combined []string
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			skills, err := cfg.ResolveSkills(part, canonicalSkillsDir)
+			if err != nil {
+				continue
+			}
+			for _, s := range skills {
+				if !seen[s] {
+					seen[s] = true
+					combined = append(combined, s)
+				}
+			}
+		}
+		if len(combined) > 0 {
+			return combined, nil
+		}
 	}
 
 	p, ok := cfg.Profiles[profileName]
@@ -146,6 +193,9 @@ func ListAllSkillNames(canonicalSkillsDir string) ([]string, error) {
 
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
 		// Follow symlinks so linked skills (e.g. job-application-agents) are included
 		fullPath := filepath.Join(canonicalSkillsDir, e.Name())
 		info, err := os.Stat(fullPath)

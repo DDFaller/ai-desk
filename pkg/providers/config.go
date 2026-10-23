@@ -80,6 +80,15 @@ func (r *Registry) Get(name string) (ProviderConfig, bool) {
 	return p, ok
 }
 
+// ListNames returns sorted names of all configured providers.
+func (r *Registry) ListNames() []string {
+	names := make([]string, 0, len(r.Providers))
+	for name := range r.Providers {
+		names = append(names, name)
+	}
+	return names
+}
+
 // ActiveKey returns the first available API key, or the single APIKey.
 func (p ProviderConfig) ActiveKey(keyIndex int) string {
 	if len(p.APIKeys) > 0 {

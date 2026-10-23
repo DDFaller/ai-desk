@@ -55,3 +55,42 @@ func TestRotationEngine_Policies(t *testing.T) {
 		t.Errorf("expected acc-3 for round robin (skipping cooldown acc-2), got %s", rrSelected.ID)
 	}
 }
+
+func TestAccountProfiles(t *testing.T) {
+	tmpFile := t.TempDir() + "/profiles.yaml"
+	cfg, err := LoadAccountProfiles(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadAccountProfiles failed: %v", err)
+	}
+
+	if cfg.ActiveProfile != "default" {
+		t.Errorf("expected active profile default, got %s", cfg.ActiveProfile)
+	}
+
+	// Assign account to work profile
+	if err := cfg.AssignAccount("work", "work-dev@example.com"); err != nil {
+		t.Fatalf("AssignAccount failed: %v", err)
+	}
+	if err := cfg.Save(tmpFile); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Reload
+	reloaded, err := LoadAccountProfiles(tmpFile)
+	if err != nil {
+		t.Fatalf("reloaded failed: %v", err)
+	}
+	workProf := reloaded.Profiles["work"]
+	if len(workProf.Accounts) != 1 || workProf.Accounts[0] != "work-dev@example.com" {
+		t.Errorf("expected work-dev@example.com in work profile, got %v", workProf.Accounts)
+	}
+
+	allAccounts := []AccountStatus{
+		{Email: "work-dev@example.com", RemainingQuotaPct: 100},
+		{Email: "personal@example.com", RemainingQuotaPct: 80},
+	}
+	filtered := reloaded.FilterAccounts("work", allAccounts)
+	if len(filtered) != 1 || filtered[0].Email != "work-dev@example.com" {
+		t.Errorf("expected only work-dev filtered, got %v", filtered)
+	}
+}

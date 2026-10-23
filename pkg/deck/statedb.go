@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -47,6 +48,15 @@ type TokenUsage struct {
 	CachedInputTokens  int64
 	ReasoningTokens    int64
 	ModelContextWindow int64
+
+	// Quota & Rate Limit Telemetry
+	RateLimitUsedPct float64   // e.g. 99.0
+	RateLimitResetAt time.Time // e.g. 2026-10-29 22:00:00 UTC
+	Exhausted        bool      // true if 429 or usage_limit_exceeded
+	ExhaustionReason string    // e.g. "usage_limit_exceeded"
+	PlanType         string    // e.g. "prolite"
+	CreditsRemaining string    // e.g. "0"
+	AccountEmail     string    // email bound to account quota
 }
 
 // StateDB coordinates directly with Agent-Deck's state.db.
@@ -57,6 +67,9 @@ type StateDB struct {
 
 // DefaultStateDBPath returns the standard agent-deck state.db location.
 func DefaultStateDBPath() string {
+	if p := os.Getenv("AGENTDECK_STATE_DB"); p != "" {
+		return p
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "agent-deck", "profiles", "default", "state.db")
 }
@@ -78,7 +91,36 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 		return nil, fmt.Errorf("open sqlite %s: %w", dbPath, err)
 	}
 
+	// Ensure routines table exists
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS routines (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		cron_expr TEXT NOT NULL,
+		command TEXT NOT NULL,
+		tool TEXT NOT NULL DEFAULT 'agy',
+		account TEXT NOT NULL DEFAULT 'default',
+		skills TEXT NOT NULL DEFAULT 'core',
+		status TEXT NOT NULL DEFAULT 'active',
+		last_run_at INTEGER NOT NULL DEFAULT 0,
+		next_run_at INTEGER NOT NULL DEFAULT 0,
+		last_status TEXT NOT NULL DEFAULT '',
+		last_output TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL
+	);`); err != nil {
+		if !strings.Contains(err.Error(), "readonly") {
+			return nil, fmt.Errorf("migrate routines table: %w", err)
+		}
+	}
+
 	return &StateDB{db: db, path: dbPath}, nil
+}
+
+// DB returns the underlying sql.DB pointer.
+func (s *StateDB) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
 }
 
 // Close closes the database connection.
@@ -242,3 +284,76 @@ func (s *StateDB) DeleteGroupCascade(groupPath string) ([]InstanceRecord, error)
 
 	return targets, nil
 }
+
+// FindInstance locates a single instance record by ID or title.
+func (s *StateDB) FindInstance(identifier string) (*InstanceRecord, error) {
+	query := `SELECT id, title, project_path, group_path, sort_order, command, wrapper, tool, status, tmux_session, created_at, last_accessed, account, tool_data 
+		FROM instances 
+		WHERE id = ? OR title = ? LIMIT 1`
+	var inst InstanceRecord
+	err := s.db.QueryRow(query, identifier, identifier).Scan(
+		&inst.ID, &inst.Title, &inst.ProjectPath, &inst.GroupPath, &inst.SortOrder,
+		&inst.Command, &inst.Wrapper, &inst.Tool, &inst.Status, &inst.TmuxSession,
+		&inst.CreatedAt, &inst.LastAccessed, &inst.Account, &inst.ToolData,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("session %q not found", identifier)
+		}
+		return nil, fmt.Errorf("find instance %q: %w", identifier, err)
+	}
+	return &inst, nil
+}
+
+// UpdateInstanceHarness updates an instance's tool, command, and tool_data records in state.db.
+func (s *StateDB) UpdateInstanceHarness(id, newTool, newCommand, toolDataJSON string) error {
+	query := `UPDATE instances SET tool = ?, command = ?, tool_data = ? WHERE id = ?`
+	res, err := s.db.Exec(query, newTool, newCommand, toolDataJSON, id)
+	if err != nil {
+		return fmt.Errorf("update instance harness: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("session with id %q not found for harness update", id)
+	}
+	return nil
+}
+
+// UpdateInstanceAccount updates an instance's account record in state.db.
+func (s *StateDB) UpdateInstanceAccount(id, account string) error {
+	query := `UPDATE instances SET account = ? WHERE id = ?`
+	res, err := s.db.Exec(query, account, id)
+	if err != nil {
+		return fmt.Errorf("update instance account: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("session with id %q not found for account update", id)
+	}
+	return nil
+}
+
+// UpdateInstanceToolData updates an instance's tool_data JSON in state.db.
+func (s *StateDB) UpdateInstanceToolData(id, toolDataJSON string) error {
+	query := `UPDATE instances SET tool_data = ? WHERE id = ?`
+	res, err := s.db.Exec(query, toolDataJSON, id)
+	if err != nil {
+		return fmt.Errorf("update instance tool_data: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("session with id %q not found for tool_data update", id)
+	}
+	return nil
+}
+
+// UpdateInstanceAccountDirect updates an instance's account record directly on *sql.DB.
+func UpdateInstanceAccountDirect(db *sql.DB, id, account string) error {
+	query := `UPDATE instances SET account = ? WHERE id = ?`
+	_, err := db.Exec(query, account, id)
+	if err != nil {
+		return fmt.Errorf("update instance account direct: %w", err)
+	}
+	return nil
+}
+
