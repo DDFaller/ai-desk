@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"github.com/falluba/ai-desk/pkg/rotation"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
 	"os"
@@ -15,7 +16,7 @@ func AccountsPath() string {
 	if p := os.Getenv("AI_DESK_ACCOUNTS_DIR"); p != "" {
 		return p
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	return filepath.Join(home, ".ai-desk", "accounts")
 }
 
@@ -59,6 +60,9 @@ func ListAccounts(tool string) ([]rotation.AccountStatus, error) {
 
 // ImportAccount copies a credential document without exposing its contents.
 func ImportAccount(tool, id, source string) error {
+	if id == "default" {
+		return fmt.Errorf("default is reserved for native login; choose a named account ID")
+	}
 	if err := ValidateSkillName(id); err != nil {
 		return err
 	}

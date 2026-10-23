@@ -11,6 +11,8 @@ import (
 
 // SessionConfig is stored alongside upstream tool_data without removing its keys.
 type SessionConfig struct {
+	SandboxID      string   `json:"sandbox_id,omitempty"`
+	AgentID        string   `json:"agent_id,omitempty"`
 	Version        int      `json:"config_version"`
 	AccountProfile string   `json:"account_profile"`
 	SkillProfile   string   `json:"skill_profile"`
@@ -61,7 +63,11 @@ func (s *StateDB) SaveSessionConfig(inst *InstanceRecord, cfg SessionConfig) err
 func SessionVirtualizer(v *harness.Virtualizer, inst *InstanceRecord) *harness.Virtualizer {
 	cfg, _ := ReadSessionConfig(inst)
 	if cfg.Version >= 1 {
-		return v.ForSession(inst.ID)
+		id := cfg.SandboxID
+		if id == "" {
+			id = inst.ID
+		}
+		return v.ForSession(id)
 	}
 	return v
 }
@@ -80,6 +86,14 @@ func SessionSkills(v *harness.Virtualizer, inst *InstanceRecord) ([]string, erro
 // SetSessionSkills stages changes; no claim is made that the running CLI reloaded them.
 func (s *StateDB) SetSessionSkills(v *harness.Virtualizer, id, profile string, skills []string) error {
 	inst, err := s.FindInstance(id)
+	if err != nil {
+		return err
+	}
+	agentCfg, err := ReadSessionConfig(inst)
+	if err != nil {
+		return err
+	}
+	v, err = s.AgentVirtualizer(v, agentCfg.AgentID)
 	if err != nil {
 		return err
 	}

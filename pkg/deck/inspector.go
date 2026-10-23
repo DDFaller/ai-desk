@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/rotation"
 	"github.com/falluba/ai-desk/pkg/rtk"
@@ -446,7 +447,7 @@ func readActiveAccountHint(dir string) string {
 }
 
 func readDefaultGoogleAccount() string {
-	home, err := os.UserHomeDir()
+	home, err := configpaths.HomeDir()
 	if err != nil {
 		return ""
 	}
@@ -471,7 +472,8 @@ func extractTokenMetrics(target *InstanceRecord) (TokenUsage, bool) {
 	if target == nil {
 		return TokenUsage{}, false
 	}
-	cacheKey := target.Tool + ":" + target.Account + ":" + target.ID
+	cfg, _ := ReadSessionConfig(target)
+	cacheKey := target.Tool + ":" + target.Account + ":" + target.ID + ":" + cfg.SandboxID
 	tokenMetricsCacheMu.RLock()
 	if entry, ok := tokenMetricsCache[cacheKey]; ok {
 		if time.Since(entry.cachedAt) < 5*time.Second {
@@ -491,7 +493,7 @@ func extractTokenMetrics(target *InstanceRecord) (TokenUsage, bool) {
 }
 
 func extractTokenMetricsInternal(target *InstanceRecord) (TokenUsage, bool) {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 
 	// 1. Try extracting AGY quotas and transcripts
 	if target.Tool == "agy" || target.Tool == "gemini" {
@@ -546,6 +548,9 @@ func extractTokenMetricsInternal(target *InstanceRecord) (TokenUsage, bool) {
 		codexID, _ := toolData["codex_session_id"].(string)
 
 		sessionsDir := filepath.Join(home, ".codex", "sessions")
+		if cfg, _ := ReadSessionConfig(target); cfg.Version >= 1 {
+			sessionsDir = filepath.Join(SessionVirtualizer(harness.NewVirtualizer("", ""), target).SandboxPath(target.Tool, target.Account), "sessions")
+		}
 		if _, err := os.Stat(sessionsDir); err == nil {
 			var latestFile string
 			var latestMod time.Time
@@ -581,6 +586,9 @@ func extractTokenMetricsInternal(target *InstanceRecord) (TokenUsage, bool) {
 	// 3. Try Claude Code transcripts
 	if target.Tool == "claude" {
 		claudeDir := filepath.Join(home, ".claude", "projects")
+		if cfg, _ := ReadSessionConfig(target); cfg.Version >= 1 {
+			claudeDir = filepath.Join(SessionVirtualizer(harness.NewVirtualizer("", ""), target).SandboxPath(target.Tool, target.Account), "projects")
+		}
 		if _, err := os.Stat(claudeDir); err == nil {
 			var latestFile string
 			var latestMod time.Time
@@ -629,14 +637,9 @@ func parseCodexRolloutTokens(path string) (TokenUsage, bool) {
 		line := scanner.Bytes()
 		lineStr := string(line)
 
-		// Check for error payloads e.g. usage_limit_exceeded or rate limits
-		if strings.Contains(lineStr, "usage_limit_exceeded") || strings.Contains(lineStr, "rate_limit_exceeded") || strings.Contains(lineStr, "You've hit your usage limit") {
+		if reason := quotaEvent(line); reason != "" {
 			lastUsage.Exhausted = true
-			if strings.Contains(lineStr, "usage_limit_exceeded") {
-				lastUsage.ExhaustionReason = "usage_limit_exceeded"
-			} else {
-				lastUsage.ExhaustionReason = "rate_limit_exceeded"
-			}
+			lastUsage.ExhaustionReason = reason
 			found = true
 		}
 
@@ -711,7 +714,7 @@ func parseCodexRolloutTokens(path string) (TokenUsage, bool) {
 				} `json:"payload"`
 			}
 			if err := json.Unmarshal(line, &ev); err == nil && ev.Payload.Type == "task_complete" {
-				if ev.Payload.Error != nil {
+				if ev.Payload.Error != nil && quotaError(ev.Payload.Error.CodexErrorInfo, ev.Payload.Error.Message, 0) {
 					lastUsage.Exhausted = true
 					if ev.Payload.Error.CodexErrorInfo != "" {
 						lastUsage.ExhaustionReason = ev.Payload.Error.CodexErrorInfo
@@ -739,7 +742,7 @@ func parseAgyTranscriptTokens(usage *TokenUsage) bool {
 	}
 	agyBrainTokensCacheMu.RUnlock()
 
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	brainDir := filepath.Join(home, ".gemini", "antigravity-cli", "brain")
 	if _, err := os.Stat(brainDir); err != nil {
 		return false
@@ -815,36 +818,93 @@ func parseClaudeTranscriptTokens(path string) (TokenUsage, bool) {
 		return TokenUsage{}, false
 	}
 	defer f.Close()
-
 	var usage TokenUsage
 	found := false
-
 	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 1024*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
+	scanner.Buffer(make([]byte, 65536), 10*1024*1024)
+	type counts struct {
+		Input  int64 `json:"input_tokens"`
+		Output int64 `json:"output_tokens"`
+		Cached int64 `json:"cache_read_input_tokens"`
+	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if !strings.Contains(string(line), `"usage"`) {
+		if reason := quotaEvent(line); reason != "" {
+			usage.Exhausted = true
+			usage.ExhaustionReason = reason
+			found = true
+		}
+		var entry struct {
+			Usage   counts `json:"usage"`
+			Message struct {
+				Usage counts `json:"usage"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
 			continue
 		}
-
-		var entry struct {
-			Usage struct {
-				InputTokens      int64 `json:"input_tokens"`
-				OutputTokens     int64 `json:"output_tokens"`
-				CacheReadTokens  int64 `json:"cache_read_input_tokens"`
-				CacheWriteTokens int64 `json:"cache_creation_input_tokens"`
-			} `json:"usage"`
+		c := entry.Usage
+		if c.Input == 0 && c.Output == 0 {
+			c = entry.Message.Usage
 		}
-
-		if err := json.Unmarshal(line, &entry); err == nil && entry.Usage.InputTokens > 0 {
-			usage.InputTokens += entry.Usage.InputTokens
-			usage.OutputTokens += entry.Usage.OutputTokens
-			usage.CachedInputTokens += entry.Usage.CacheReadTokens
+		if c.Input != 0 || c.Output != 0 || c.Cached != 0 {
+			usage.InputTokens += c.Input
+			usage.OutputTokens += c.Output
+			usage.CachedInputTokens += c.Cached
 			usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 			found = true
 		}
 	}
 	return usage, found
+}
+
+func quotaError(code, message string, status int) bool {
+	if status == 429 {
+		return true
+	}
+	switch strings.ToLower(code) {
+	case "usage_limit_exceeded", "rate_limit_exceeded", "rate_limit_error", "insufficient_quota", "resource_exhausted":
+		return true
+	}
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "you've hit your usage limit") || strings.Contains(lower, "quota exceeded") || strings.Contains(lower, "rate limit exceeded")
+}
+
+// Only provider error envelopes can trigger automatic rotation; quoted user text cannot.
+func quotaEvent(line []byte) string {
+	type apiError struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Info    string `json:"codex_error_info"`
+		Message string `json:"message"`
+		Status  int    `json:"status"`
+	}
+	var ev struct {
+		Type    string    `json:"type"`
+		Subtype string    `json:"subtype"`
+		Error   *apiError `json:"error"`
+		Payload struct {
+			Type    string    `json:"type"`
+			Error   *apiError `json:"error"`
+			Message string    `json:"message"`
+			Info    string    `json:"codex_error_info"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &ev) != nil {
+		return ""
+	}
+	var e *apiError
+	if ev.Type == "error" || (ev.Type == "system" && ev.Subtype == "api_error") {
+		e = ev.Error
+	}
+	if ev.Type == "event_msg" && (ev.Payload.Type == "error" || ev.Payload.Type == "task_complete") {
+		e = ev.Payload.Error
+		if e == nil && ev.Payload.Type == "error" {
+			e = &apiError{Info: ev.Payload.Info, Message: ev.Payload.Message}
+		}
+	}
+	if e != nil && (quotaError(e.Type, e.Message, e.Status) || quotaError(e.Code, "", 0) || quotaError(e.Info, "", 0)) {
+		return "provider_quota_exhausted"
+	}
+	return ""
 }

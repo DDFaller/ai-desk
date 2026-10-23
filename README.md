@@ -4,6 +4,24 @@
 
 ---
 
+
+## Current development versions
+
+- `fix/session-profiles`: v0.3.6 release candidate with per-session account policies, explicit `none` skills, a searchable manual skill browser, and isolated runtime configuration.
+- `feat/persistent-agent-tui`: v0.4.0 preview adding persistent identities, dedicated worktrees, bounded memory, agent session tabs, and files inspection. This remains a TUI.
+
+Build without running dependency installers:
+
+```sh
+go build -o bin/ai-desk ./cmd/ai-desk
+go build -o bin/desk-shim ./cmd/desk-shim
+./bin/ai-desk
+```
+
+In the preview, press `g` to manage agents, `n` to create a session, `s` to browse skills, `a` for session account/profile controls, and `m` for agent files. `Alt+1/2/3` starts Codex/Claude/Antigravity for the selected agent. Profile selection is independent per session. Skill selections are staged until an explicit restart; browsing does not inject the catalog into the model.
+
+Live multi-account authentication, continuation and voice checks remain release gates. See [implementation and verification notes](docs/IMPLEMENTATION.md) and [the ADE adaptation](docs/ADE-DESIGN.md), including migration and test-isolation details.
+
 ## ✨ Features
 
 - **Multi-Harness Process Orchestration**: Seamlessly manage and run agents across **Antigravity (`agy`)**, **Claude Code (`claude`)**, **Codex CLI (`codex`)**, **OpenCode (`opencode`)**, and **Vox Video Studio (`vox-studio`)**.
@@ -20,7 +38,7 @@
   - Automatic 429 / quota exhaustion failover routing sessions to the next healthy account.
   - Isolated credential sandboxing (`GEMINI_CLI_HOME`, `AI_DESK_ACCOUNT`, and permission mirroring).
 - **Conscious Skills Projection**:
-  - Curated skill profiles (`core`, `web`, `video`, `career`, `minimal`, `all`) that project only relevant skills into each agent session, saving up to 90% in token tax.
+  - Curated skill profiles (`core`, `web`, `video`, `career`, `minimal`, `all`) that project only relevant skills into each agent session, reducing injected skill catalog overhead.
 - **Agent Deck Architecture**:
   - Full tmux integration with isolated sockets and crash-safe session attachment.
   - Tab path autocomplete, `Ctrl+R` recent paths cycling, `Ctrl+W` path-aware rubout, and instant `Ctrl+S` creation.

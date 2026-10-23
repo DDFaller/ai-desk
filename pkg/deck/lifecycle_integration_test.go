@@ -21,7 +21,7 @@ func TestRealTmuxSessionIsolation(t *testing.T) {
 	socket := fmt.Sprintf("ai-desk-test-%d", time.Now().UnixNano())
 	t.Cleanup(func() { _ = exec.Command(realTmux, "-L", socket, "kill-server").Run() })
 	bin := t.TempDir()
-	wrapper := "#!/bin/sh\nexec " + realTmux + " -L " + socket + " \"$@\"\n"
+	wrapper := "#!/bin/sh\nif [ \"$1\" = -L ]; then shift 2; fi\nexec " + realTmux + " -L " + socket + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}

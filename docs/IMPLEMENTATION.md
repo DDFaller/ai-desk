@@ -48,3 +48,9 @@ The shim respects the routing profile and uses provider-compatible credentials. 
 Back up state.db using SQLite's backup command before running the new version against live data. Metadata additions preserve unrelated tool_data fields and upstream table shapes. Keep the baseline binary available. Rolling back the binary does not require deleting new directories or memory. Avoid switching an active session back to an old account-shared skill directory; finish or explicitly restart it first.
 
 The next branch builds persistent agents and the ADE-inspired TUI. It remains a preview until stabilization's live acceptance gate is met.
+
+## Persistent-agent preview verification
+
+The preview adds tested agent creation, default inheritance, memory bridges across runtime changes, non-moving session adoption, archive, and dirty-worktree protection. Replacement generations retain the old configuration until the new process is available. Managed telemetry reads only that session's transcript directory; structured quota errors drive failover. Named tmux sockets are carried through replacement and attachment. The operator home is resolved separately from a nested harness HOME so profile selectors can browse the full canonical skill catalog.
+
+The full unit suite, targeted race checks, vet, builds and the isolated real-tmux fixture test passed during development. The local Lavish artifact was rendered and inspected at wide and narrow browser sizes. Live authentication and runtime memory discovery remain unverified; no production-ready release tag has been created.

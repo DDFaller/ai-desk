@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
+
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -31,6 +31,7 @@ func sanitizeSessionSlug(s string) string {
 
 // CreateTaskOptions specifies parameters for launching a new task.
 type CreateTaskOptions struct {
+	AgentID        string
 	Title          string
 	ProjectPath    string
 	GroupPath      string
@@ -49,6 +50,34 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 		return nil, fmt.Errorf("state.db connection is nil")
 	}
 
+	if opts.AgentID != "" {
+		a, err := s.FindAgent(opts.AgentID)
+		if err != nil {
+			return nil, err
+		}
+		if a.Archived {
+			return nil, fmt.Errorf("agent is archived")
+		}
+		opts.AgentID = a.ID
+		if opts.ProjectPath == "" {
+			opts.ProjectPath = a.Worktree
+		}
+		if opts.GroupPath == "" {
+			opts.GroupPath = a.Team
+		}
+		if opts.Tool == "" {
+			opts.Tool = a.Runtime
+		}
+		if opts.SkillProfile == "" {
+			opts.SkillProfile = a.SkillProfile
+		}
+		if opts.AccountProfile == "" {
+			opts.AccountProfile = a.AccountProfile
+		}
+		if opts.Title == "" {
+			opts.Title = a.Name
+		}
+	}
 	title := strings.TrimSpace(opts.Title)
 	if title == "" {
 		title = fmt.Sprintf("task-%d", time.Now().Unix()%100000)
@@ -117,6 +146,10 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 	if virt == nil {
 		virt = harness.NewVirtualizer("", "")
 	}
+	virt, err = s.AgentVirtualizer(virt, opts.AgentID)
+	if err != nil {
+		return nil, err
+	}
 	profiles, err := rotation.LoadAccountProfiles("")
 	if err != nil {
 		return nil, err
@@ -146,6 +179,7 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 	if err != nil {
 		return nil, err
 	}
+	baseVirtualizer := virt
 	virt = virt.ForSession(id)
 
 	if err := virt.PrepareCredentials(tool, account); err != nil {
@@ -160,12 +194,14 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 
 	// 4. Construct tool_data JSON
 	toolDataMap := map[string]interface{}{
-		"skill_profile":   skillProfile,
-		"account_profile": accountProfile,
-		"config_version":  1,
-		"selected_skills": append([]string{}, skillsToProject...),
-		"created_by":      "ai-desk",
-		"created_at":      time.Now().Unix(),
+		"agent_id":         opts.AgentID,
+		"tmux_socket_name": "default",
+		"skill_profile":    skillProfile,
+		"account_profile":  accountProfile,
+		"config_version":   1,
+		"selected_skills":  append([]string{}, skillsToProject...),
+		"created_by":       "ai-desk",
+		"created_at":       time.Now().Unix(),
 	}
 	if opts.InitialPrompt != "" {
 		toolDataMap["initial_prompt"] = opts.InitialPrompt
@@ -188,6 +224,10 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 		return nil, fmt.Errorf("insert instance record: %w", err)
 	}
 
+	if err := s.BindAgentMemory(baseVirtualizer, &InstanceRecord{ID: id, Tool: tool, Account: account, ToolData: toolDataJSON}); err != nil {
+		return nil, err
+	}
+
 	// 6. Spawn tmux session if available
 	var envArgs []string
 	for k, v := range envOverrides {
@@ -198,19 +238,19 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 		launchCmd = fmt.Sprintf("env %s %s", strings.Join(envArgs, " "), cmd)
 	}
 
-	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-c", projectPath, launchCmd)
+	tmuxCmd := tmuxOnSocket("default", "new-session", "-d", "-s", tmuxSession, "-c", projectPath, launchCmd)
 	if output, tErr := tmuxCmd.CombinedOutput(); tErr != nil {
 		_, _ = s.db.Exec("UPDATE instances SET status = 'error' WHERE id = ?", id)
 		return nil, fmt.Errorf("launch task: %w: %s", tErr, strings.TrimSpace(string(output)))
 	} else {
 		for k, v := range envOverrides {
-			_ = exec.Command("tmux", "set-environment", "-t", tmuxSession, k, v).Run()
+			_ = tmuxOnSocket("default", "set-environment", "-t", tmuxSession, k, v).Run()
 		}
 
 		if opts.InitialPrompt != "" {
 			go func() {
 				time.Sleep(1500 * time.Millisecond)
-				_ = exec.Command("tmux", "send-keys", "-t", tmuxSession, opts.InitialPrompt, "Enter").Run()
+				_ = tmuxOnSocket("default", "send-keys", "-t", tmuxSession, opts.InitialPrompt, "Enter").Run()
 			}()
 		}
 	}

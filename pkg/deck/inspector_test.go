@@ -121,3 +121,18 @@ func TestResolveInstanceAccount(t *testing.T) {
 	InvalidateInspectionCache("test-1")
 	InvalidateInspectionCache("")
 }
+
+func TestQuotaDetectionDoesNotRotateForQuotedTextOrOtherErrors(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"user","message":"usage_limit_exceeded"}`,
+		`{"type":"event_msg","payload":{"type":"task_complete","error":{"codex_error_info":"network_error","message":"network unavailable"}}}`,
+	} {
+		if reason := quotaEvent([]byte(line)); reason != "" {
+			t.Fatalf("false quota signal %q", reason)
+		}
+	}
+	line := `{"type":"system","subtype":"api_error","error":{"status":429,"type":"rate_limit_error"}}`
+	if quotaEvent([]byte(line)) == "" {
+		t.Fatal("missed provider rate limit")
+	}
+}

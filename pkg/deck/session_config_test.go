@@ -95,7 +95,7 @@ func TestFailedReplacementKeepsOldSession(t *testing.T) {
 	}
 	bin := t.TempDir()
 	log := filepath.Join(bin, "calls")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + log + "'\ncase \"$1\" in new-session) exit 1;; esac\nexit 0\n"
+	script := "#!/bin/sh\nif [ \"$1\" = -L ]; then shift 2; fi\nprintf '%s\\n' \"$*\" >> '" + log + "'\ncase \"$1\" in new-session) exit 1;; esac\nexit 0\n"
 	_ = os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0700)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	_, err = SwitchHarness(db, harness.NewVirtualizer(t.TempDir(), t.TempDir()), "test-inst-1", SwitchOptions{TargetTool: "claude"})

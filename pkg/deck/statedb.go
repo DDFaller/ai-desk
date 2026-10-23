@@ -3,6 +3,7 @@ package deck
 import (
 	"database/sql"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,7 +71,7 @@ func DefaultStateDBPath() string {
 	if p := os.Getenv("AGENTDECK_STATE_DB"); p != "" {
 		return p
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	return filepath.Join(home, ".local", "share", "agent-deck", "profiles", "default", "state.db")
 }
 

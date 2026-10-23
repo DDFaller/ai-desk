@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,7 @@ type Virtualizer struct {
 
 // NewVirtualizer creates a new Virtualizer instance.
 func NewVirtualizer(baseDir, skillsPath string) *Virtualizer {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	if baseDir == "" {
 		baseDir = os.Getenv("AI_DESK_HARNESSES_DIR")
 	}
@@ -269,7 +270,7 @@ func (v *Virtualizer) ensureSymlink(target, linkPath string) {
 // projectRTK projects global RTK (Rust Token Killer) hooks and configurations
 // into the isolated harness sandbox, ensuring transparent terminal token reduction.
 func (v *Virtualizer) projectRTK(tool, sandbox string) {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	switch tool {
 	case "claude":
 		srcRTK := filepath.Join(home, ".claude", "RTK.md")
@@ -316,7 +317,7 @@ func (v *Virtualizer) projectRTK(tool, sandbox string) {
 // projectHostDotfiles symlinks user dotfiles into the sandbox so standard
 // shell and git development commands continue functioning when HOME=sandbox.
 func (v *Virtualizer) projectHostDotfiles(sandbox string) {
-	home, err := os.UserHomeDir()
+	home, err := configpaths.HomeDir()
 	if err != nil || home == "" || sandbox == home {
 		return
 	}
@@ -342,7 +343,7 @@ func (v *Virtualizer) projectHostDotfiles(sandbox string) {
 // projectCredentials projects host credentials and configuration into the sandbox
 // so agents never ask for re-login when switching contexts or harnesses.
 func (v *Virtualizer) projectCredentials(tool, accountID, sandbox string) {
-	home, err := os.UserHomeDir()
+	home, err := configpaths.HomeDir()
 	if err != nil || home == "" || sandbox == home {
 		return
 	}
@@ -468,7 +469,7 @@ func (v *Virtualizer) PrepareAgyAccount(accountID, tokenJSON, email string) erro
 	// Symlink host dotfiles
 	v.projectHostDotfiles(sandbox)
 
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	hostGemini := ""
 	if home != "" {
 		hostGemini = filepath.Join(home, ".gemini")
@@ -627,7 +628,7 @@ func (v *Virtualizer) TrustProjectFolder(projectPath string) error {
 		projectPath = absPath
 	}
 
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	var targetFiles []string
 	if home != "" {
 		targetFiles = append(targetFiles,
@@ -672,7 +673,7 @@ func (v *Virtualizer) ReplicateToolPermissions(tool, accountID, projectPath stri
 		_ = v.TrustProjectFolder(projectPath)
 	}
 	sandbox := v.SandboxPath(tool, accountID)
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	if home == "" || sandbox == home {
 		return nil
 	}
@@ -768,4 +769,11 @@ func ValidateSkillName(name string) error {
 		return fmt.Errorf("invalid skill name %q", name)
 	}
 	return nil
+}
+
+// WithSkillsPath changes only the catalog source, retaining session isolation.
+func (v *Virtualizer) WithSkillsPath(path string) *Virtualizer {
+	clone := *v
+	clone.skillsPath = path
+	return &clone
 }

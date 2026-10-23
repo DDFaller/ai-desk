@@ -23,7 +23,7 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-const Version = "0.3.5"
+const Version = "0.4.0-preview"
 
 type FocusPane int
 
@@ -34,6 +34,19 @@ const (
 )
 
 type Model struct {
+	agents           []deck.AgentRecord
+	showAgentManager bool
+	agentCreating    bool
+	agentInputs      [7]TextInputState
+	agentField       int
+	agentIndex       int
+	newTaskAgentID   string
+	showAgentFiles   bool
+	agentFiles       []agentFile
+	agentFileIndex   int
+	agentFileContent string
+	agentFileScroll  int
+
 	focus            FocusPane
 	sessions         []SessionItem
 	selectedSession  int
@@ -235,7 +248,14 @@ func (m *Model) reload() {
 		m.sdb = sdb
 		groups, _ := sdb.LoadGroups()
 		instances, _ := sdb.LoadInstances()
-		m.treeRoots = deck.BuildGroupTree(groups, instances)
+		m.agents, _ = sdb.ListAgents(true)
+		var activeAgents []deck.AgentRecord
+		for _, a := range m.agents {
+			if !a.Archived {
+				activeAgents = append(activeAgents, a)
+			}
+		}
+		m.treeRoots = deck.BuildAgentTree(groups, instances, activeAgents)
 		m.treeItems = deck.FlattenVisibleTree(m.treeRoots)
 	}
 
@@ -399,6 +419,19 @@ func (m *Model) initNewTaskDialog() {
 		initialPath, _ = os.Getwd()
 	}
 
+	m.newTaskAgentID = ""
+	if a := m.selectedAgent(); a != nil {
+		m.newTaskAgentID = a.ID
+		initialPath = a.Worktree
+		initialGroup = a.Team
+		m.newTaskAccountProfile = a.AccountProfile
+		m.newTaskSkillProfiles = map[string]bool{a.SkillProfile: true}
+		for i, h := range availableHarnesses {
+			if h.ID == a.Runtime {
+				m.newTaskToolIdx = i
+			}
+		}
+	}
 	m.newTaskPathInput.Set(initialPath)
 	m.newTaskGroupInput.Set(initialGroup)
 	m.newTaskTitleInput.Clear() // Leave title empty initially for user input
@@ -464,6 +497,7 @@ func (m Model) submitNewTask() (tea.Model, tea.Cmd) {
 			Tool:           toolID,
 			Account:        accountID,
 			AccountProfile: m.newTaskAccountProfile,
+			AgentID:        m.newTaskAgentID,
 			SkillProfile:   profile,
 			InitialPrompt:  prompt,
 		}
@@ -525,6 +559,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		key := msg.String()
+		if m.showAgentManager {
+			return m.updateAgentManager(msg)
+		}
+		if m.showAgentFiles {
+			return m.updateAgentFiles(msg)
+		}
 		if m.showSkillsOverlay {
 			return m.updateSkills(msg)
 		}
@@ -1315,6 +1355,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 3. Global Navigation Keys
 		switch key {
+		case "g":
+			m.showAgentManager = true
+			return m, nil
+		case "m":
+			m.loadAgentFiles()
+			return m, nil
+		case "alt+left":
+			m.cycleAgentSession(-1)
+			return m, nil
+		case "alt+right":
+			m.cycleAgentSession(1)
+			return m, nil
+		case "alt+1":
+			return m.startAgentSession("codex")
+		case "alt+2":
+			return m.startAgentSession("claude")
+		case "alt+3":
+			return m.startAgentSession("agy")
 		case "ctrl+c":
 			return m, tea.Quit
 
@@ -1353,6 +1411,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "d":
+			if a := m.selectedAgent(); a != nil && m.selectedInstance() == nil {
+				m.setToast("Use g, then a to archive this agent; files are retained.")
+				return m, nil
+			}
 			if len(m.treeItems) > 0 {
 				item := m.treeItems[m.selectedTreeIdx]
 				if item.IsGroup && item.GroupNode != nil {
@@ -1780,7 +1842,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	availWidth := m.width - 6
+	availWidth := m.width - 8
 	if availWidth < 80 {
 		availWidth = 80
 	}
@@ -2019,15 +2081,22 @@ func (m Model) View() string {
 
 	// 1. Top Header
 	header := m.renderHeader()
+	if bar := m.agentWorkspaceBar(max(1, m.width-2)); bar != "" {
+		header += "\n" + bar
+	}
 
 	// 2. Main Content
-	contentHeight := m.height - 7
+	contentHeight := max(1, m.height-lipgloss.Height(header)-4)
 	if contentHeight < 10 {
 		contentHeight = 10
 	}
 
 	var mainContent string
-	if m.showDeleteDialog {
+	if m.showAgentManager {
+		mainContent = m.agentManagerView(m.width-4, contentHeight)
+	} else if m.showAgentFiles {
+		mainContent = m.agentFilesView(m.width-4, contentHeight)
+	} else if m.showDeleteDialog {
 		mainContent = m.renderDeleteDialog(m.width-4, contentHeight)
 	} else if m.showInspector && m.currentInspection != nil {
 		mainContent = RenderInspectorView(m.currentInspection, m.width-4, contentHeight)
@@ -2039,9 +2108,25 @@ func (m Model) View() string {
 		mainContent = m.renderRoutinesDialog(m.width-4, contentHeight)
 	} else if m.showVoiceDialog {
 		mainContent = m.renderVoiceDialog(m.width-4, contentHeight)
+	} else if m.width < 110 {
+		width := max(1, m.width-4)
+		switch {
+		case m.showNewTaskDialog:
+			mainContent = m.renderNewTaskDialog(width, contentHeight)
+		case m.showAccountDialog:
+			mainContent = m.renderAccountDialog(width, contentHeight)
+		case m.showSwitchDialog:
+			mainContent = m.renderSwitchDialog(width, contentHeight)
+		case m.focus == FocusSelection:
+			mainContent = m.renderSelectionPane(width, contentHeight)
+		case m.focus == FocusTask:
+			mainContent = m.renderTaskPane(width, contentHeight)
+		default:
+			mainContent = m.renderStatusPane(width, contentHeight)
+		}
 	} else {
 		// 3-Pane Side-by-Side Layout
-		availWidth := m.width - 6
+		availWidth := m.width - 8
 		if availWidth < 80 {
 			availWidth = 80
 		}
@@ -2083,7 +2168,7 @@ func (m Model) View() string {
 	// 3. Footer / Shortcuts
 	footer := m.renderFooter()
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, mainContent, footer)
+	return fitViewport(lipgloss.JoinVertical(lipgloss.Left, header, mainContent, footer), m.width, m.height)
 }
 
 func (m Model) renderHeader() string {
@@ -2138,11 +2223,11 @@ func (m Model) renderHeader() string {
 // Pane 1: Selection (Hierarchical Tree of Groups & Tasks)
 func (m Model) renderSelectionPane(width, height int) string {
 	bStyle := inactiveBorder
-	titleLeft := lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render("[1] SELECTION")
+	titleLeft := lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render("[1] TEAMS / AGENTS")
 	titleRight := lipgloss.NewStyle().Foreground(subtleColor).Render("TREE")
 	if m.focus == FocusSelection {
 		bStyle = activeBorder
-		titleLeft = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1a1b26")).Background(primaryColor).Padding(0, 1).Render("1. SELECTION")
+		titleLeft = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1a1b26")).Background(primaryColor).Padding(0, 1).Render("1. TEAMS / AGENTS")
 		titleRight = lipgloss.NewStyle().Foreground(cyanColor).Bold(true).Render("● ACTIVE")
 	}
 
@@ -2190,6 +2275,9 @@ func (m Model) renderSelectionPane(width, height int) string {
 
 			if item.IsGroup && item.GroupNode != nil {
 				prefix := "▼ 📂 "
+				if item.GroupNode.Agent != nil {
+					prefix = "◉ "
+				}
 				if !item.GroupNode.Expanded {
 					prefix = "▶ 📁 "
 				}
@@ -2308,7 +2396,11 @@ func (m Model) renderTaskPane(width, height int) string {
 	} else {
 		item := m.treeItems[m.selectedTreeIdx]
 
-		if item.IsGroup && item.GroupNode != nil {
+		if item.IsGroup && item.GroupNode != nil && item.GroupNode.Agent != nil {
+			a := item.GroupNode.Agent
+			title = "Agent: " + a.Name
+			lines = append(lines, "Role: "+a.Role, "Runtime: "+a.Runtime, "Account profile: "+a.AccountProfile, "Skill profile: "+a.SkillProfile, "Worktree: "+a.Worktree, "", "n: new session • g: agent manager", "Alt+1 Codex • Alt+2 Claude • Alt+3 agy", "m: memory, skills and worktree files", "Sessions share this agent's worktree.")
+		} else if item.IsGroup && item.GroupNode != nil {
 			title = fmt.Sprintf("%s %s  Group: %s", titleLeft, titleRight, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(item.GroupNode.Name))
 			lines = append(lines, cardHeader.Render("GROUP OVERVIEW"))
 			lines = append(lines, fmt.Sprintf("  • Full Path:       %s", lipgloss.NewStyle().Foreground(cyanColor).Render(item.GroupNode.Path)))
@@ -2319,7 +2411,7 @@ func (m Model) renderTaskPane(width, height int) string {
 			lines = append(lines, cardHeader.Render("GROUP SHORTCUTS"))
 			lines = append(lines, "  • [Space] / [Enter] : Toggle expand/collapse")
 			lines = append(lines, "  • [d]               : Cascade delete group and ALL sessions")
-			lines = append(lines, "  • [g]               : Create new subgroup")
+			lines = append(lines, "  • [g]               : Manage persistent agents")
 		} else if !item.IsGroup && item.Session != nil {
 			toolBadge := RenderToolBadge(item.Session.Tool)
 			statusColor := successColor
@@ -2397,6 +2489,9 @@ func (m Model) renderTaskPane(width, height int) string {
 // buildStatusPaneLines builds the content lines for Pane 3 and returns the line index of the Voice button.
 func (m Model) buildStatusPaneLines(width int) ([]string, int) {
 	var lines []string
+	if a := m.selectedAgent(); a != nil {
+		lines = append(lines, "AGENT FILES · "+a.Name, "Memory: AGENT.md / USER.md / MEMORY.md", "Skills: manually attached", "m: browse files", "")
+	}
 
 	divWidth := width - 4
 	if divWidth < 10 {
@@ -2588,7 +2683,7 @@ func (m Model) buildStatusPaneLines(width int) ([]string, int) {
 				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render("◆ ACTIONS"))
 				lines = append(lines, "  • [Space] Expand / Collapse")
 				lines = append(lines, "  • [d]     Cascade Delete")
-				lines = append(lines, "  • [g]     New Subgroup")
+				lines = append(lines, "  • [g]     Agent Manager")
 			}
 		}
 		lines = append(lines, divider)

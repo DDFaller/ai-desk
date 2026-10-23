@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,7 @@ type SwapBridge struct {
 
 func NewSwapBridge(geminiDir string) *SwapBridge {
 	if geminiDir == "" {
-		home, _ := os.UserHomeDir()
+		home, _ := configpaths.HomeDir()
 		geminiDir = filepath.Join(home, ".gemini", "agy-swap")
 	}
 	return &SwapBridge{geminiDir: geminiDir}

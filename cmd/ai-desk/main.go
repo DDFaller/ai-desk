@@ -38,6 +38,7 @@ func printHelp() {
 	fmt.Println("  tui, ui             Launch the interactive terminal user interface")
 	fmt.Println("  status              Show all saved accounts, quota meters, providers, and sessions")
 	fmt.Println("  accounts [list]     Inspect managed accounts & active task allocation")
+	fmt.Println("  agent [action]      Persistent agents, worktrees, memory, and sessions")
 	fmt.Println("  task create [opts]  Create & launch a new isolated task (or press [n] in TUI)")
 	fmt.Println("  routine [action]    Manage scheduled cron routines & recurring background agents")
 	fmt.Println("                      Actions: list, add, run <id>, pause <id>, resume <id>, delete <id>, daemon")
@@ -1606,6 +1607,8 @@ func main() {
 		cmdGroup(subArgs)
 	case "session":
 		cmdSession(subArgs)
+	case "agent":
+		cmdAgent(os.Args[2:])
 	case "task":
 		cmdTaskCreate(subArgs)
 	case "providers":

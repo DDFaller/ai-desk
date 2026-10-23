@@ -2,6 +2,7 @@ package rotation
 
 import (
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,7 +27,7 @@ type AccountProfilesConfig struct {
 
 // DefaultAccountProfilesPath returns ~/.ai-desk/account-profiles.yaml.
 func DefaultAccountProfilesPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	return filepath.Join(home, ".ai-desk", "account-profiles.yaml")
 }
 

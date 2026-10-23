@@ -49,6 +49,14 @@ func (m Model) skillEntries() []string {
 	names := m.skillProfileOptions()
 	if m.skillCatalog {
 		names, _ = harness.ListAllSkillNames(m.v.SkillsPath())
+		if a := m.selectedAgent(); a != nil {
+			entries, _ := os.ReadDir(filepath.Join(a.Home, "skills"))
+			for _, e := range entries {
+				if e.IsDir() {
+					names = append(names, "agent--"+e.Name())
+				}
+			}
+		}
 	}
 	var filtered []string
 	for _, name := range names {
@@ -114,7 +122,7 @@ func (m Model) updateSkills(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		name := names[m.selectedProfile]
 		if key == "ctrl+v" {
 			if m.skillCatalog {
-				data, err := os.ReadFile(filepath.Join(m.v.SkillsPath(), name, "SKILL.md"))
+				data, err := os.ReadFile(m.skillSource(name))
 				if err != nil {
 					m.setToast(err.Error())
 				} else {
@@ -216,4 +224,11 @@ func (m Model) skillsView(width, height int) string {
 		lines[i] = truncateString(lines[i], max(1, width-4))
 	}
 	return activeBorder.Width(max(1, width)).Height(max(1, height)).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) skillSource(name string) string {
+	if a := m.selectedAgent(); a != nil && strings.HasPrefix(name, "agent--") {
+		return filepath.Join(a.Home, "skills", strings.TrimPrefix(name, "agent--"), "SKILL.md")
+	}
+	return filepath.Join(m.v.SkillsPath(), name, "SKILL.md")
 }

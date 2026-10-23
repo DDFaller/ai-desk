@@ -29,7 +29,7 @@ func TestUI_ThreePaneModelLifecycle(t *testing.T) {
 		t.Errorf("expected view to contain 'v%s', got:\n%s", Version, view)
 	}
 	// Check all 3 panes are present in the view
-	if !strings.Contains(strings.ToUpper(view), "SELECTION") {
+	if !strings.Contains(strings.ToUpper(view), "TEAMS / AGENTS") {
 		t.Errorf("expected view to contain Pane 1 'Selection', got:\n%s", view)
 	}
 	if !strings.Contains(strings.ToUpper(view), "TASK") {
@@ -153,12 +153,12 @@ func TestUI_RenderStatusPaneCards(t *testing.T) {
 			Tool:      "codex",
 			GroupPath: "features/auth",
 		},
-		ActiveProfile: "core",
-		ActiveSkills:  []string{"verification", "git"},
+		ActiveProfile:   "core",
+		ActiveSkills:    []string{"verification", "git"},
 		HasTokenMetrics: true,
 		TokensUsed: deck.TokenUsage{
-			TotalTokens: 15420,
-			InputTokens: 12000,
+			TotalTokens:  15420,
+			InputTokens:  12000,
 			OutputTokens: 3420,
 		},
 	}

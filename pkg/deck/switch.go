@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
+
 	"path/filepath"
 	"strings"
 	"time"
@@ -81,12 +81,20 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		return nil, err
 	}
 
+	socket, err := sdb.tmuxSocket(inst)
+	if err != nil {
+		return nil, err
+	}
 	targetTool, targetCmd, err := NormalizeHarnessName(opts.TargetTool)
 	if err != nil {
 		return nil, err
 	}
 
 	sessionCfg, err := ReadSessionConfig(inst)
+	if err != nil {
+		return nil, err
+	}
+	virt, err = sdb.AgentVirtualizer(virt, sessionCfg.AgentID)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +183,7 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 			Tool:           targetTool,
 			Account:        accountID,
 			AccountProfile: sessionCfg.AccountProfile,
+			AgentID:        sessionCfg.AgentID,
 			SkillProfile:   profile,
 			InitialPrompt:  directive,
 		}
@@ -214,7 +223,9 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		}
 		sessionCfg.SkillProfile = opts.SkillProfile
 	}
-	virt = virt.ForSession(inst.ID)
+	baseVirtualizer := virt
+	sessionCfg.SandboxID = fmt.Sprintf("%s-%x", inst.ID, time.Now().UnixNano())
+	virt = virt.ForSession(sessionCfg.SandboxID)
 	if err := virt.PrepareCredentials(targetTool, accountID); err != nil {
 		return nil, err
 	}
@@ -226,6 +237,16 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 	}
 	_ = virt.ReplicateToolPermissions(targetTool, accountID, inst.ProjectPath)
 	result.SkillsAttached = len(skillsToProject)
+	bridgeInst := *inst
+	bridgeInst.Tool = targetTool
+	bridgeInst.Account = accountID
+	bridgeConfig := sessionCfg
+	bridgeConfig.Version = 1
+	bridgeBytes, _ := json.Marshal(bridgeConfig)
+	bridgeInst.ToolData = string(bridgeBytes)
+	if err := sdb.BindAgentMemory(baseVirtualizer, &bridgeInst); err != nil {
+		return nil, err
+	}
 
 	if handoffContent != "" && result.SandboxPath != "" {
 		_ = os.WriteFile(filepath.Join(result.SandboxPath, ".ai-desk-handoff.md"), []byte(handoffContent), 0600)
@@ -273,22 +294,22 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 	result.LaunchCommand = launchCmd
 
 	// 5. Recreate fresh tmux session
-	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", inst.TmuxSession, "-c", inst.ProjectPath, launchCmd)
+	tmuxCmd := tmuxOnSocket(socket, "new-session", "-d", "-s", inst.TmuxSession, "-c", inst.ProjectPath, launchCmd)
 	if out, err := tmuxCmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("launch replacement: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	if err := exec.Command("tmux", "has-session", "-t", "="+replacement).Run(); err != nil {
+	if err := tmuxOnSocket(socket, "has-session", "-t", "="+replacement).Run(); err != nil {
 		return nil, fmt.Errorf("replacement exited during launch: %w", err)
 	}
 	if oldTmux != "" {
-		if err := exec.Command("tmux", "kill-session", "-t", "="+oldTmux).Run(); err != nil {
-			_ = exec.Command("tmux", "kill-session", "-t", "="+replacement).Run()
+		if err := tmuxOnSocket(socket, "kill-session", "-t", "="+oldTmux).Run(); err != nil {
+			_ = tmuxOnSocket(socket, "kill-session", "-t", "="+replacement).Run()
 			return nil, fmt.Errorf("stop old session: %w", err)
 		}
 	}
 
 	for k, v := range envOverrides {
-		_ = exec.Command("tmux", "set-environment", "-t", inst.TmuxSession, k, v).Run()
+		_ = tmuxOnSocket(socket, "set-environment", "-t", inst.TmuxSession, k, v).Run()
 	}
 
 	// 6. Clean previous session IDs & persist changes in state.db
@@ -331,6 +352,8 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 	toolDataMap["cross_harness_history"] = history
 	toolDataMap["last_switched_at"] = time.Now().Unix()
 	toolDataMap["config_version"] = 1
+	toolDataMap["sandbox_id"] = sessionCfg.SandboxID
+	toolDataMap["tmux_socket_name"] = socket
 	toolDataMap["account_profile"] = sessionCfg.AccountProfile
 	toolDataMap["skill_profile"] = sessionCfg.SkillProfile
 	toolDataMap["selected_skills"] = append([]string{}, skillsToProject...)
@@ -378,6 +401,10 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		return nil, err
 	}
 
+	socket, err := sdb.tmuxSocket(inst)
+	if err != nil {
+		return nil, err
+	}
 	tool := strings.ToLower(inst.Tool)
 	if tool == "" {
 		tool = "agy"
@@ -416,10 +443,10 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 
 	// 3. Update tmux environment variables
 	if inst.TmuxSession != "" {
-		hasSess := exec.Command("tmux", "has-session", "-t", inst.TmuxSession).Run() == nil
+		hasSess := tmuxOnSocket(socket, "has-session", "-t", inst.TmuxSession).Run() == nil
 		if hasSess {
 			for k, v := range envOverrides {
-				_ = exec.Command("tmux", "set-environment", "-t", inst.TmuxSession, k, v).Run()
+				_ = tmuxOnSocket(socket, "set-environment", "-t", inst.TmuxSession, k, v).Run()
 			}
 
 			if respawn {
@@ -438,7 +465,7 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 				if inst.ProjectPath != "" {
 					launchCmd = fmt.Sprintf("cd %s && %s", quoteArg(inst.ProjectPath), cmdWithEnv)
 				}
-				respawnCmd := exec.Command("tmux", "respawn-pane", "-k", "-t", inst.TmuxSession, launchCmd)
+				respawnCmd := tmuxOnSocket(socket, "respawn-pane", "-k", "-t", inst.TmuxSession, launchCmd)
 				if err := respawnCmd.Run(); err != nil {
 					return nil, fmt.Errorf("restart failed: %w", err)
 				}

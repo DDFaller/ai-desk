@@ -7,6 +7,7 @@ import (
 
 // GroupNode represents a node in the hierarchical group tree.
 type GroupNode struct {
+	Agent      *AgentRecord
 	Path       string
 	Name       string
 	Depth      int
@@ -34,6 +35,7 @@ func BuildGroupTree(groups []GroupRecord, instances []InstanceRecord) []*GroupNo
 		if cleanPath == "" {
 			continue
 		}
+		ensureGroupAncestry(nodeMap, cleanPath)
 		parts := strings.Split(cleanPath, "/")
 		name := g.Name
 		if name == "" {
@@ -86,10 +88,6 @@ func BuildGroupTree(groups []GroupRecord, instances []InstanceRecord) []*GroupNo
 }
 
 func ensureGroupAncestry(nodeMap map[string]*GroupNode, path string) {
-	if _, exists := nodeMap[path]; exists {
-		return
-	}
-
 	parts := strings.Split(path, "/")
 	current := ""
 	for i, seg := range parts {

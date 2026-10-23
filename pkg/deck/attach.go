@@ -20,21 +20,11 @@ func (s *StateDB) PrepareSessionAttach(virt *harness.Virtualizer, identifier str
 	if err != nil {
 		return nil, err
 	}
-	socket := "default"
-	// Older agent-deck databases did not store a per-session socket.
-	var hasSocket int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('instances') WHERE name = 'tmux_socket_name'`).Scan(&hasSocket); err != nil {
+	socket, err := s.tmuxSocket(inst)
+	if err != nil {
 		return nil, err
 	}
-	if hasSocket != 0 {
-		var name string
-		if err := s.db.QueryRow(`SELECT COALESCE(tmux_socket_name, '') FROM instances WHERE id = ?`, inst.ID).Scan(&name); err != nil {
-			return nil, err
-		}
-		if name != "" {
-			socket = name
-		}
-	}
+
 	name := inst.TmuxSession
 	if name == "" {
 		name = inst.ID
@@ -68,8 +58,25 @@ func (s *StateDB) PrepareSessionAttach(virt *harness.Virtualizer, identifier str
 		}
 	}
 	if missing || dead {
+		if virt == nil {
+			virt = harness.NewVirtualizer("", "")
+		}
+		cfg, err := ReadSessionConfig(inst)
+		if err != nil {
+			return nil, err
+		}
+		virt, err = s.AgentVirtualizer(virt, cfg.AgentID)
+		if err != nil {
+			return nil, err
+		}
 		command, env, err := recoveryCommand(virt, inst)
 		if err != nil {
+			return nil, err
+		}
+		if virt == nil {
+			virt = harness.NewVirtualizer("", "")
+		}
+		if err := s.BindAgentMemory(virt, inst); err != nil {
 			return nil, err
 		}
 		args := []string{"new-session", "-d", "-s", name, "-c", inst.ProjectPath}
