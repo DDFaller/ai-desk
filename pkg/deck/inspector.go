@@ -201,38 +201,11 @@ func (s *StateDB) InspectSessionRecord(target *InstanceRecord) (*SessionInspecti
 	if insp.ActiveProfile == "" {
 		insp.ActiveProfile = harness.DetectWorkspaceProfile(target.ProjectPath)
 	}
-	skillsCfg, _ := harness.LoadSkillProfiles("")
-	if skillsCfg != nil {
-		resolved, _ := skillsCfg.ResolveSkills(insp.ActiveProfile, "")
-		insp.ActiveSkills = resolved
-		tax := len(resolved) * 60
-		if len(resolved) >= 70 {
-			tax = 4500
-		}
-		insp.PromptTaxTurn = tax
-	}
-
-	// Also check if per-session sandbox has extra dynamically attached skills
 	v := harness.NewVirtualizer("", "")
-	accID := target.Account
-	if accID == "" {
-		accID = target.ID
-	}
-	attached, _ := v.ListAttachedSkills(target.Tool, accID)
-	if len(attached) > 0 {
-		for _, s := range attached {
-			alreadyPresent := false
-			for _, r := range insp.ActiveSkills {
-				if r == s {
-					alreadyPresent = true
-					break
-				}
-			}
-			if !alreadyPresent {
-				insp.ActiveSkills = append(insp.ActiveSkills, s+" (dynamic)")
-				insp.PromptTaxTurn += 60
-			}
-		}
+	insp.ActiveSkills, _ = SessionSkills(v, target)
+	insp.PromptTaxTurn = len(insp.ActiveSkills) * 60
+	if cfg, err := ReadSessionConfig(target); err == nil && cfg.SkillsPending {
+		insp.ActiveProfile += " (restart required)"
 	}
 
 	// 3. Token metrics inspection
@@ -674,11 +647,11 @@ func parseCodexRolloutTokens(path string) (TokenUsage, bool) {
 					Type string `json:"type"`
 					Info struct {
 						TotalTokenUsage struct {
-							InputTokens        int64 `json:"input_tokens"`
-							CachedInputTokens  int64 `json:"cached_input_tokens"`
-							OutputTokens       int64 `json:"output_tokens"`
-							ReasoningTokens    int64 `json:"reasoning_output_tokens"`
-							TotalTokens        int64 `json:"total_tokens"`
+							InputTokens       int64 `json:"input_tokens"`
+							CachedInputTokens int64 `json:"cached_input_tokens"`
+							OutputTokens      int64 `json:"output_tokens"`
+							ReasoningTokens   int64 `json:"reasoning_output_tokens"`
+							TotalTokens       int64 `json:"total_tokens"`
 						} `json:"total_token_usage"`
 						ModelContextWindow int64 `json:"model_context_window"`
 					} `json:"info"`
@@ -858,10 +831,10 @@ func parseClaudeTranscriptTokens(path string) (TokenUsage, bool) {
 
 		var entry struct {
 			Usage struct {
-				InputTokens       int64 `json:"input_tokens"`
-				OutputTokens      int64 `json:"output_tokens"`
-				CacheReadTokens   int64 `json:"cache_read_input_tokens"`
-				CacheWriteTokens  int64 `json:"cache_creation_input_tokens"`
+				InputTokens      int64 `json:"input_tokens"`
+				OutputTokens     int64 `json:"output_tokens"`
+				CacheReadTokens  int64 `json:"cache_read_input_tokens"`
+				CacheWriteTokens int64 `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
 

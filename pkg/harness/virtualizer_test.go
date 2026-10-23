@@ -98,11 +98,11 @@ func TestVirtualizer_PrepareSandbox(t *testing.T) {
 	}
 
 	// Test Codex credentials projection
-	_, err = v.PrepareSandboxWithSkills("codex", "test-codex-account", nil)
+	_, err = v.PrepareSandboxWithSkills("codex", "default", nil)
 	if err != nil {
 		t.Fatalf("prepare codex sandbox failed: %v", err)
 	}
-	expectedCodexDir := filepath.Join(harnessesDir, "codex", "test-codex-account")
+	expectedCodexDir := filepath.Join(harnessesDir, "codex", "default")
 	if _, err := os.Stat(filepath.Join(home, ".codex", "auth.json")); err == nil {
 		authLink := filepath.Join(expectedCodexDir, "auth.json")
 		if _, err := os.Lstat(authLink); err != nil {

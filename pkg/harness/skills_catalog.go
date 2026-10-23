@@ -28,11 +28,11 @@ type SkillDetail struct {
 }
 
 type SkillAuditReport struct {
-	TotalSkills       int
-	TotalWords        int
-	CatalogTokenTax   int
-	CategoryCounts    map[string]int
-	Skills            []SkillDetail
+	TotalSkills     int
+	TotalWords      int
+	CatalogTokenTax int
+	CategoryCounts  map[string]int
+	Skills          []SkillDetail
 }
 
 // DefaultSkillProfilesPath returns ~/.ai-desk/skill-profiles.yaml
@@ -59,12 +59,17 @@ func LoadSkillProfiles(path string) (*SkillProfilesConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse skill-profiles.yaml: %w", err)
 	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = make(map[string]ProfileDefinition)
+	}
+	cfg.Profiles["none"] = ProfileDefinition{Description: "No skills injected; browse and attach manually", Skills: []string{}}
 	return cfg, nil
 }
 
 func defaultProfilesConfig() *SkillProfilesConfig {
 	return &SkillProfilesConfig{
 		Profiles: map[string]ProfileDefinition{
+			"none": {Description: "No skills injected; browse and attach manually", Skills: []string{}},
 			"minimal": {
 				Description: "Lean baseline for pure coding without specialized framework tools",
 				Skills:      []string{"verification", "react-best-practices"},
@@ -104,6 +109,9 @@ func defaultProfilesConfig() *SkillProfilesConfig {
 
 // ResolveSkills resolves the list of skill directory names for a given profile or comma-separated list of profiles.
 func (cfg *SkillProfilesConfig) ResolveSkills(profileName, canonicalSkillsDir string) ([]string, error) {
+	if profileName == "none" {
+		return []string{}, nil
+	}
 	if profileName == "" || profileName == "auto" {
 		profileName = DetectWorkspaceProfile("")
 	}
@@ -120,7 +128,7 @@ func (cfg *SkillProfilesConfig) ResolveSkills(profileName, canonicalSkillsDir st
 			}
 			skills, err := cfg.ResolveSkills(part, canonicalSkillsDir)
 			if err != nil {
-				continue
+				return nil, err
 			}
 			for _, s := range skills {
 				if !seen[s] {
@@ -129,9 +137,7 @@ func (cfg *SkillProfilesConfig) ResolveSkills(profileName, canonicalSkillsDir st
 				}
 			}
 		}
-		if len(combined) > 0 {
-			return combined, nil
-		}
+		return combined, nil
 	}
 
 	p, ok := cfg.Profiles[profileName]

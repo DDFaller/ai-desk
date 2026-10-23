@@ -11,7 +11,7 @@ import (
 
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/rotation"
-	"github.com/falluba/ai-desk/pkg/swapbridge"
+	"sync"
 )
 
 // SwitchOptions specifies settings when switching a running session's harness.
@@ -67,6 +67,15 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 	}
 
 	// 1. Locate instance
+	initial, err := sdb.FindInstance(sessionIDOrTitle)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := sdb.lockTransition(initial.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	inst, err := sdb.FindInstance(sessionIDOrTitle)
 	if err != nil {
 		return nil, err
@@ -77,19 +86,21 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		return nil, err
 	}
 
+	sessionCfg, err := ReadSessionConfig(inst)
+	if err != nil {
+		return nil, err
+	}
 	oldTool := inst.Tool
 	accountID := opts.AccountID
 	if accountID == "" || accountID == "default" {
 		accountID = inst.Account
 	}
-	if accountID == "" || accountID == "default" {
-		sb := swapbridge.NewSwapBridge("")
-		if accs, err := sb.LoadAccounts(); err == nil && len(accs) > 0 {
-			accountID = accs[0].Email
-		}
-	}
-	if accountID == "" {
+	if targetTool != oldTool && opts.AccountID == "" {
 		accountID = "default"
+	}
+	accountID, err = RouteAccount(targetTool, sessionCfg.AccountProfile, accountID)
+	if err != nil {
+		return nil, err
 	}
 
 	result := &SwitchResult{
@@ -152,16 +163,29 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		}
 		profile := opts.SkillProfile
 		if profile == "" {
-			profile = "core"
+			profile = sessionCfg.SkillProfile
+			if profile == "" {
+				profile = "none"
+			}
 		}
 		createOpts := CreateTaskOptions{
-			Title:         newTaskTitle,
-			ProjectPath:   inst.ProjectPath,
-			GroupPath:     inst.GroupPath,
-			Tool:          targetTool,
-			Account:       accountID,
-			SkillProfile:  profile,
-			InitialPrompt: directive,
+			Title:          newTaskTitle,
+			ProjectPath:    inst.ProjectPath,
+			GroupPath:      inst.GroupPath,
+			Tool:           targetTool,
+			Account:        accountID,
+			AccountProfile: sessionCfg.AccountProfile,
+			SkillProfile:   profile,
+			InitialPrompt:  directive,
+		}
+		if opts.PreserveSkills {
+			createOpts.SelectedSkills, err = SessionSkills(virt, inst)
+			if err != nil {
+				return nil, err
+			}
+			if createOpts.SelectedSkills == nil {
+				createOpts.SelectedSkills = []string{}
+			}
 		}
 		newInst, createErr := sdb.CreateTask(virt, createOpts)
 		if createErr != nil {
@@ -174,39 +198,25 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		return result, nil
 	}
 
-	// 3. Resolve and project skills for the new harness
-	var skillsToProject []string
-	if opts.PreserveSkills {
-		// Inherit currently attached skills
-		active, _ := virt.ListAttachedSkills(oldTool, accountID)
-		skillsToProject = active
-	} else if opts.SkillProfile != "" {
-		cfg, pErr := harness.LoadSkillProfiles("")
-		if pErr == nil {
-			resolved, rErr := cfg.ResolveSkills(opts.SkillProfile, "")
-			if rErr == nil {
-				skillsToProject = resolved
-			}
-		}
-	} else {
-		// Default to core profile
-		skillsToProject = []string{
-			"shadcn", "verification", "auth", "react-best-practices",
-			"env-vars", "deployments-cicd", "bootstrap",
-		}
+	// Preserve the exact selected set unless an explicit replacement was requested.
+	skillsToProject, err := SessionSkills(virt, inst)
+	if err != nil {
+		return nil, err
 	}
-
-	// Ensure isolated account credentials exist for agy
-	if targetTool == "agy" || targetTool == "gemini" {
-		sb := swapbridge.NewSwapBridge("")
-		token, err := sb.ReadAccountToken(accountID)
-		if err != nil || token == "" {
-			if accs, err := sb.LoadAccounts(); err == nil && len(accs) > 0 {
-				token, _ = sb.ReadAccountToken(accs[0].Email)
-				accountID = accs[0].Email
-			}
+	if opts.SkillProfile != "" && !opts.PreserveSkills {
+		cfg, err := harness.LoadSkillProfiles("")
+		if err != nil {
+			return nil, err
 		}
-		_ = virt.PrepareAgyAccount(accountID, token, accountID)
+		skillsToProject, err = cfg.ResolveSkills(opts.SkillProfile, virt.SkillsPath())
+		if err != nil {
+			return nil, err
+		}
+		sessionCfg.SkillProfile = opts.SkillProfile
+	}
+	virt = virt.ForSession(inst.ID)
+	if err := virt.PrepareCredentials(targetTool, accountID); err != nil {
+		return nil, err
 	}
 
 	result.SandboxPath = virt.SandboxPath(targetTool, accountID)
@@ -221,14 +231,11 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		_ = os.WriteFile(filepath.Join(result.SandboxPath, ".ai-desk-handoff.md"), []byte(handoffContent), 0600)
 	}
 
-	// 4. Terminate lingering old tmux session and prepare launch command
-	if inst.TmuxSession != "" {
-		_ = exec.Command("tmux", "kill-session", "-t", inst.TmuxSession).Run()
-	} else {
-		slug := sanitizeSessionSlug(inst.Title)
-		inst.TmuxSession = fmt.Sprintf("agentdeck_%s_%x", slug, time.Now().UnixNano()&0xffff)
-	}
-	result.TmuxSession = inst.TmuxSession
+	// Prepare a replacement session before stopping the old process.
+	oldTmux := inst.TmuxSession
+	replacement := fmt.Sprintf("agentdesk_%s_%x", sanitizeSessionSlug(inst.Title), time.Now().UnixNano())
+	inst.TmuxSession = replacement
+	result.TmuxSession = replacement
 
 	// Build command to launch target harness with handoff prompt
 	cmdWithArgs := targetCmd
@@ -267,9 +274,19 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 
 	// 5. Recreate fresh tmux session
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", inst.TmuxSession, "-c", inst.ProjectPath, launchCmd)
-	if err := tmuxCmd.Run(); err != nil {
-		_ = exec.Command("tmux", "new-session", "-d", "-s", inst.TmuxSession, launchCmd).Run()
+	if out, err := tmuxCmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("launch replacement: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	if err := exec.Command("tmux", "has-session", "-t", "="+replacement).Run(); err != nil {
+		return nil, fmt.Errorf("replacement exited during launch: %w", err)
+	}
+	if oldTmux != "" {
+		if err := exec.Command("tmux", "kill-session", "-t", "="+oldTmux).Run(); err != nil {
+			_ = exec.Command("tmux", "kill-session", "-t", "="+replacement).Run()
+			return nil, fmt.Errorf("stop old session: %w", err)
+		}
+	}
+
 	for k, v := range envOverrides {
 		_ = exec.Command("tmux", "set-environment", "-t", inst.TmuxSession, k, v).Run()
 	}
@@ -313,6 +330,11 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 	})
 	toolDataMap["cross_harness_history"] = history
 	toolDataMap["last_switched_at"] = time.Now().Unix()
+	toolDataMap["config_version"] = 1
+	toolDataMap["account_profile"] = sessionCfg.AccountProfile
+	toolDataMap["skill_profile"] = sessionCfg.SkillProfile
+	toolDataMap["selected_skills"] = append([]string{}, skillsToProject...)
+	toolDataMap["skills_pending"] = false
 
 	updatedDataJSON, _ := json.Marshal(toolDataMap)
 	updateQuery := `UPDATE instances SET tool = ?, command = ?, tmux_session = ?, tool_data = ?, status = 'running', last_accessed = ? WHERE id = ?`
@@ -361,25 +383,36 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		tool = "agy"
 	}
 
-	// 1. Prepare isolated account credentials in sandbox
-	if tool == "agy" || tool == "gemini" {
-		sb := swapbridge.NewSwapBridge("")
-		token, _ := sb.ReadAccountToken(targetAccount)
-		if err := virt.PrepareAgyAccount(targetAccount, token, targetAccount); err != nil {
-			return nil, fmt.Errorf("prepare agy account: %w", err)
-		}
+	cfg, err := ReadSessionConfig(inst)
+	if err != nil {
+		return nil, err
 	}
-
-	// 2. Prepare sandbox environment and project existing skills
-	activeSkills, _ := virt.ListAttachedSkills(tool, inst.Account)
-	if len(activeSkills) == 0 {
-		activeSkills, _ = virt.ListAttachedSkills(tool, "default")
+	targetAccount, err = RouteAccount(tool, cfg.AccountProfile, targetAccount)
+	if err != nil {
+		return nil, err
+	}
+	if respawn {
+		result, err := SwitchHarness(sdb, virt, inst.ID, SwitchOptions{TargetTool: tool, AccountID: targetAccount, PreserveSkills: true, IncludeHandoff: true})
+		if err != nil {
+			return nil, err
+		}
+		return result.Instance, nil
+	}
+	activeSkills, err := SessionSkills(virt, inst)
+	if err != nil {
+		return nil, err
+	}
+	virt = virt.ForSession(inst.ID)
+	if err := virt.PrepareCredentials(tool, targetAccount); err != nil {
+		return nil, err
 	}
 	envOverrides, err := virt.PrepareSandboxWithSkills(tool, targetAccount, activeSkills)
 	if err != nil {
-		return nil, fmt.Errorf("prepare sandbox for %s: %w", targetAccount, err)
+		return nil, fmt.Errorf("prepare sandbox: %w", err)
 	}
-	_ = virt.ReplicateToolPermissions(tool, targetAccount, inst.ProjectPath)
+	if err := virt.ReplicateToolPermissions(tool, targetAccount, inst.ProjectPath); err != nil {
+		return nil, err
+	}
 
 	// 3. Update tmux environment variables
 	if inst.TmuxSession != "" {
@@ -406,15 +439,22 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 					launchCmd = fmt.Sprintf("cd %s && %s", quoteArg(inst.ProjectPath), cmdWithEnv)
 				}
 				respawnCmd := exec.Command("tmux", "respawn-pane", "-k", "-t", inst.TmuxSession, launchCmd)
-				_ = respawnCmd.Run()
+				if err := respawnCmd.Run(); err != nil {
+					return nil, fmt.Errorf("restart failed: %w", err)
+				}
 			} else {
-				notifyText := fmt.Sprintf("# Note: Session account switched to %s\n", targetAccount)
-				_ = exec.Command("tmux", "send-keys", "-t", inst.TmuxSession, notifyText).Run()
+				return nil, fmt.Errorf("account changes require restart; rerun with respawn enabled")
 			}
 		}
 	}
 
 	// 4. Update SQLite state.db
+	cfg.Version = 1
+	cfg.SelectedSkills = append([]string{}, activeSkills...)
+	cfg.SkillsPending = false
+	if err := sdb.SaveSessionConfig(inst, cfg); err != nil {
+		return nil, err
+	}
 	if err := sdb.UpdateInstanceAccount(inst.ID, targetAccount); err != nil {
 		return nil, fmt.Errorf("update instance account: %w", err)
 	}
@@ -426,7 +466,7 @@ func SwitchAccount(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 }
 
 func quoteArg(s string) string {
-	if strings.ContainsAny(s, " \t\n$\"'\\") {
+	if strings.ContainsAny(s, " \t\n$\"'\\;|&()<>`*?[]{}!#~") {
 		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 	}
 	return s
@@ -467,7 +507,11 @@ func BuildHarnessLaunchCommand(targetCmd, prompt string) string {
 // AutoFailoverSession automatically detects quota exhaustion or 429 rate limits,
 // selects the next healthy account according to the active profile policy,
 // and migrates the session seamlessly without manual user intervention.
+var failoverMu sync.Mutex
+
 func AutoFailoverSession(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle string, reason string) (*InstanceRecord, error) {
+	failoverMu.Lock()
+	defer failoverMu.Unlock()
 	if sdb == nil {
 		return nil, fmt.Errorf("state.db connection is nil")
 	}
@@ -480,48 +524,57 @@ func AutoFailoverSession(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTit
 		return nil, err
 	}
 
+	var eventData struct {
+		LastFailover int64 `json:"last_failover_at"`
+	}
+	if err := json.Unmarshal([]byte(inst.ToolData), &eventData); err == nil && time.Now().Unix()-eventData.LastFailover < 20 {
+		return nil, fmt.Errorf("session just switched accounts; waiting for fresh quota telemetry")
+	}
 	cfg, err := rotation.LoadAccountProfiles("")
 	if err != nil {
-		cfg = rotation.DefaultAccountProfilesConfig()
+		return nil, err
 	}
-
-	activeProfName := cfg.ActiveProfile
+	sessionCfg, err := ReadSessionConfig(inst)
+	if err != nil {
+		return nil, err
+	}
+	activeProfName := sessionCfg.AccountProfile
+	if activeProfName == "" {
+		activeProfName = cfg.ActiveProfile
+		sessionCfg.AccountProfile = activeProfName
+		if err := sdb.SaveSessionConfig(inst, sessionCfg); err != nil {
+			return nil, err
+		}
+	}
 	prof, ok := cfg.Profiles[activeProfName]
 	if !ok {
-		prof = rotation.AccountProfile{
-			Name:         "default",
-			Policy:       rotation.PolicyBalanced,
-			AutoFailover: true,
-		}
+		return nil, fmt.Errorf("unknown account profile %q", activeProfName)
 	}
 
 	if !prof.AutoFailover {
 		return nil, fmt.Errorf("auto-failover is disabled in profile %q", activeProfName)
 	}
 
-	sb := swapbridge.NewSwapBridge("")
-	allAccounts, err := sb.LoadAccounts()
+	allAccounts, err := harness.ListAccounts(inst.Tool)
 	if err != nil || len(allAccounts) == 0 {
 		return nil, fmt.Errorf("no accounts available in vault for failover: %v", err)
 	}
 
 	candidates := cfg.FilterAccounts(activeProfName, allAccounts)
-	if len(candidates) <= 1 {
-		// If only 1 or 0 accounts in profile, fallback to all accounts
-		candidates = allAccounts
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no eligible accounts in profile %q", activeProfName)
 	}
 
-	engine := rotation.NewEngine(nil)
 	failedID := inst.Account
-	if failedID == "" {
-		failedID = candidates[0].Email
+	if failedID == "" || failedID == "default" {
+		return nil, fmt.Errorf("session account identity is unknown")
 	}
 
 	if reason == "" {
 		reason = "HTTP 429 rate limit or quota depleted"
 	}
 
-	nextAcc, err := engine.Failover(candidates, failedID, 20*time.Minute, prof.Policy)
+	nextAcc, err := rotation.FailoverPersisted(candidates, failedID, 20*time.Minute, prof.Policy, inst.Tool)
 	if err != nil {
 		return nil, fmt.Errorf("select next account on failover: %w", err)
 	}
@@ -569,7 +622,9 @@ func AutoFailoverSession(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTit
 	toolDataMap["last_failover_at"] = time.Now().Unix()
 	newToolData, _ := json.Marshal(toolDataMap)
 
-	_ = sdb.UpdateInstanceToolData(updatedInst.ID, string(newToolData))
+	if err := sdb.UpdateInstanceToolData(updatedInst.ID, string(newToolData)); err != nil {
+		return updatedInst, err
+	}
 	updatedInst.ToolData = string(newToolData)
 
 	return updatedInst, nil

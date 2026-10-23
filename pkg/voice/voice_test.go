@@ -30,6 +30,9 @@ func TestVoice_SpeakValidation(t *testing.T) {
 }
 
 func TestVoice_LocalSynthesisSmoke(t *testing.T) {
+	if os.Getenv("AI_DESK_LIVE_VOICE") != "1" {
+		t.Skip("set AI_DESK_LIVE_VOICE=1 for live synthesis")
+	}
 	bin := FindVoxBinary()
 	if bin == "" {
 		t.Skip("vox binary not installed, skipping live synthesis")
@@ -38,8 +41,7 @@ func TestVoice_LocalSynthesisSmoke(t *testing.T) {
 	tempWav := filepath.Join(t.TempDir(), "test.wav")
 	out, err := Speak("Test resident voice", "alba", tempWav)
 	if err != nil {
-		t.Logf("Speak error in test environment: %v", err)
-		return
+		t.Fatalf("Speak failed: %v", err)
 	}
 	if _, statErr := os.Stat(out); statErr != nil {
 		t.Errorf("expected generated WAV at %s", out)

@@ -94,3 +94,26 @@ func TestAccountProfiles(t *testing.T) {
 		t.Errorf("expected only work-dev filtered, got %v", filtered)
 	}
 }
+
+func TestRestrictedProfileNeverBroadens(t *testing.T) {
+	cfg := DefaultAccountProfilesConfig()
+	cfg.Profiles["locked"] = AccountProfile{Accounts: []string{"missing"}}
+	accounts := []AccountStatus{{ID: "outside", Email: "outside", RemainingQuotaPct: 100}}
+	for _, name := range []string{"locked", "typo"} {
+		if got := cfg.FilterAccounts(name, accounts); len(got) != 0 {
+			t.Fatalf("%s broadened to %+v", name, got)
+		}
+	}
+}
+
+func TestCooldownSurvivesEngineRestart(t *testing.T) {
+	t.Setenv("AI_DESK_RUNTIME_DIR", t.TempDir())
+	candidates := []AccountStatus{{ID: "one", RemainingQuotaPct: 100}, {ID: "two", RemainingQuotaPct: 100}}
+	next, err := FailoverPersisted(candidates, "one", time.Minute, PolicyBalanced, "codex")
+	if err != nil || next.ID != "two" {
+		t.Fatalf("first: %v %v", next, err)
+	}
+	if _, err = FailoverPersisted(candidates, "two", time.Minute, PolicyBalanced, "codex"); err == nil {
+		t.Fatal("restarted engine forgot the first cooldown")
+	}
+}

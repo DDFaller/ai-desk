@@ -8,19 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/falluba/ai-desk/pkg/deck"
 	"github.com/falluba/ai-desk/pkg/harness"
 	"github.com/falluba/ai-desk/pkg/providers"
 	"github.com/falluba/ai-desk/pkg/rotation"
-	"github.com/falluba/ai-desk/pkg/rtk"
-	"github.com/falluba/ai-desk/pkg/swapbridge"
 )
 
 func isRateLimit(output string) bool {
 	lower := strings.ToLower(output)
-	return strings.Contains(lower, "429") ||
+	return strings.Contains(lower, "http 429") ||
 		strings.Contains(lower, "rate limit") ||
 		strings.Contains(lower, "resource has been exhausted") ||
 		strings.Contains(lower, "resource_exhausted") ||
@@ -28,6 +28,26 @@ func isRateLimit(output string) bool {
 		strings.Contains(lower, "insufficient_quota") ||
 		strings.Contains(lower, "quota exceeded")
 }
+
+type captureBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *captureBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if len(p) > 131072 {
+		p = p[len(p)-131072:]
+	}
+	if b.b.Len()+len(p) > 131072 {
+		b.b.Reset()
+	}
+	_, err := b.b.Write(p)
+	return n, err
+}
+func (b *captureBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
 
 func runCommand(tool string, args []string, env map[string]string) (int, string, error) {
 	cmd := exec.Command(tool, args...)
@@ -37,7 +57,7 @@ func runCommand(tool string, args []string, env map[string]string) (int, string,
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
 
-	var outputBuf bytes.Buffer
+	var outputBuf captureBuffer
 	multiOut := io.MultiWriter(os.Stdout, &outputBuf)
 	multiErr := io.MultiWriter(os.Stderr, &outputBuf)
 
@@ -47,6 +67,9 @@ func runCommand(tool string, args []string, env map[string]string) (int, string,
 
 	err := cmd.Run()
 	exitCode := 0
+	if err != nil {
+		exitCode = 1
+	}
 	if cmd.ProcessState != nil {
 		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
 			exitCode = status.ExitStatus()
@@ -56,107 +79,100 @@ func runCommand(tool string, args []string, env map[string]string) (int, string,
 }
 
 func main() {
-	profileFlag := flag.String("profile", "default", "Account or provider profile")
-	skillsFlag := flag.String("skills", "auto", "Skill profile (auto, minimal, core, web, video, career, all)")
-	providerFlag := flag.String("provider", "", "Custom provider name from providers.yaml")
-	noResumeFlag := flag.Bool("no-resume", false, "Disable automatic --resume on rate limit failover")
+	account := flag.String("profile", "default", "Legacy account ID (use -account-profile for routing policy)")
+	profile := flag.String("account-profile", "", "Account routing profile")
+	skills := flag.String("skills", "none", "Skill profile; none starts without skills")
+	provider := flag.String("provider", "", "Custom provider")
+	noResume := flag.Bool("no-resume", false, "Disable automatic failover")
 	flag.Parse()
-
 	args := flag.Args()
 	if len(args) == 0 {
-		fmt.Println("Usage: desk-shim [options] <tool> [tool args...]")
-		fmt.Println("Options:")
-		flag.PrintDefaults()
-		os.Exit(1)
+		flag.Usage()
+		os.Exit(2)
 	}
-
-	tool := args[0]
-	toolArgs := args[1:]
-
-	v := harness.NewVirtualizer("", "")
-	sb := swapbridge.NewSwapBridge("")
-	reg, _ := providers.Load("")
-	translator := providers.NewTranslator()
-
-	// Load skill profile definitions
-	skillsCfg, _ := harness.LoadSkillProfiles("")
-	activeProfile := *skillsFlag
-	if activeProfile == "auto" {
-		activeProfile = harness.DetectWorkspaceProfile("")
+	tool, _, err := deck.NormalizeHarnessName(args[0])
+	if err != nil {
+		fatal(err)
 	}
-	activeSkills, _ := skillsCfg.ResolveSkills(activeProfile, "")
-
-	// Load accounts
-	accounts, _ := sb.LoadAccounts()
-	engine := rotation.NewEngine(nil)
-
-	// Pick initial account/provider
-	currentID := *profileFlag
-	var currentEnv map[string]string
-	var err error
-
-	if *providerFlag != "" {
-		if p, ok := reg.Get(*providerFlag); ok {
-			currentEnv = translator.EnvOverrides(tool, p, 0)
-			currentID = p.Name
+	profiles, err := rotation.LoadAccountProfiles("")
+	if err != nil {
+		fatal(err)
+	}
+	if *profile == "" {
+		*profile = profiles.ActiveProfile
+	}
+	policy, ok := profiles.Profiles[*profile]
+	if !ok {
+		fatal(fmt.Errorf("unknown account profile %q", *profile))
+	}
+	cfg, err := harness.LoadSkillProfiles("")
+	if err != nil {
+		fatal(err)
+	}
+	v := harness.NewVirtualizer("", "").ForSession(fmt.Sprintf("shim-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	selected, err := cfg.ResolveSkills(*skills, v.SkillsPath())
+	if err != nil {
+		fatal(err)
+	}
+	current, err := deck.RouteAccount(tool, *profile, *account)
+	if err != nil && *provider == "" {
+		fatal(err)
+	}
+	var env map[string]string
+	if *provider != "" {
+		registry, err := providers.Load("")
+		if err != nil {
+			fatal(err)
 		}
-	} else if len(accounts) > 0 {
-		selected, selErr := engine.SelectNext(accounts, rotation.PolicySticky, currentID)
-		if selErr == nil {
-			currentID = selected.ID
-			currentEnv, err = v.PrepareSandboxWithSkills(tool, currentID, activeSkills)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[AI-DESK] Warning: prepare sandbox: %v\n", err)
-			}
-			token, _ := sb.ReadAccountToken(selected.Email)
-			_ = v.WriteAgyToken(currentID, token, selected.Email)
+		p, ok := registry.Get(*provider)
+		if !ok {
+			fatal(fmt.Errorf("unknown provider %q", *provider))
 		}
-	}
-
-	rtkInfo := ""
-	rtkClient := rtk.NewClient()
-	if rtkClient.IsInstalled() {
-		if ver, err := rtkClient.Version(); err == nil {
-			rtkInfo = fmt.Sprintf(" | \033[1;32mRTK: active (%s)\033[0m", ver)
+		env, err = v.PrepareSandboxWithSkills(tool, "default", selected)
+		if err != nil {
+			fatal(err)
 		}
-	}
-
-	fmt.Fprintf(os.Stderr, "[AI-DESK] Launching %s in session sandbox [%s] (skills: %s [%d skills]%s)...\n",
-		tool, currentID, activeProfile, len(activeSkills), rtkInfo)
-
-	code, out, runErr := runCommand(tool, toolArgs, currentEnv)
-
-	// Check if turn hit a rate limit
-	if isRateLimit(out) && len(accounts) > 1 && !*noResumeFlag {
-		fmt.Fprintf(os.Stderr, "\n\033[1;33m[AI-DESK] Rate limit / quota exhaustion detected on account %s!\033[0m\n", currentID)
-		nextAcc, failErr := engine.Failover(accounts, currentID, 30*time.Minute, rotation.PolicyBalanced)
-		if failErr == nil {
-			fmt.Fprintf(os.Stderr, "\033[1;32m[AI-DESK] Seamlessly rotating to next healthy account: %s (remaining: %.1f%%)\033[0m\n", nextAcc.Email, nextAcc.RemainingQuotaPct)
-			newEnv, _ := v.PrepareSandboxWithSkills(tool, nextAcc.ID, activeSkills)
-			token, _ := sb.ReadAccountToken(nextAcc.Email)
-			_ = v.WriteAgyToken(nextAcc.ID, token, nextAcc.Email)
-
-			// Add --resume flag if not already present
-			hasResume := false
-			for _, a := range toolArgs {
-				if a == "--resume" || a == "-c" || a == "-r" {
-					hasResume = true
-					break
-				}
-			}
-			resumeArgs := toolArgs
-			if !hasResume {
-				resumeArgs = append(resumeArgs, "--resume")
-			}
-
-			fmt.Fprintf(os.Stderr, "[AI-DESK] Transparently resuming session with new credentials...\n\n")
-			code, _, runErr = runCommand(tool, resumeArgs, newEnv)
-		} else {
-			fmt.Fprintf(os.Stderr, "[AI-DESK] Failover failed: %v\n", failErr)
+		for k, value := range providers.NewTranslator().EnvOverrides(tool, p, 0) {
+			env[k] = value
+		}
+	} else {
+		if err = v.PrepareCredentials(tool, current); err != nil {
+			fatal(err)
+		}
+		env, err = v.PrepareSandboxWithSkills(tool, current, selected)
+		if err != nil {
+			fatal(err)
 		}
 	}
-
-	if runErr != nil && code != 0 {
+	fmt.Fprintf(os.Stderr, "[AI-DESK] %s: account=%s profile=%s skills=%s (%d)\n", tool, current, *profile, *skills, len(selected))
+	code, out, runErr := runCommand(tool, args[1:], env)
+	if code != 0 && isRateLimit(out) && policy.AutoFailover && !*noResume && *provider == "" && current != "default" {
+		accounts, err := harness.ListAccounts(tool)
+		if err != nil {
+			fatal(err)
+		}
+		candidates := profiles.FilterAccounts(*profile, accounts)
+		next, err := rotation.FailoverPersisted(candidates, current, 20*time.Minute, policy.Policy, tool)
+		if err != nil {
+			fatal(err)
+		}
+		if err = v.PrepareCredentials(tool, next.ID); err != nil {
+			fatal(err)
+		}
+		nextEnv, err := v.PrepareSandboxWithSkills(tool, next.ID, selected)
+		if err != nil {
+			fatal(err)
+		}
+		// Explicitly preserve the invocation. Do not invent a universal --resume flag.
+		fmt.Fprintf(os.Stderr, "[AI-DESK] Switched to %s; retrying the original invocation.\n", next.ID)
+		code, _, runErr = runCommand(tool, args[1:], nextEnv)
+	}
+	if runErr != nil && code == 0 {
+		fatal(runErr)
+	}
+	if code != 0 {
 		os.Exit(code)
 	}
 }
+
+func fatal(err error) { fmt.Fprintln(os.Stderr, "[AI-DESK]", err); os.Exit(1) }

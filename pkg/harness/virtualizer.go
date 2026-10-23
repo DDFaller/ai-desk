@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,6 +47,17 @@ func NewVirtualizer(baseDir, skillsPath string) *Virtualizer {
 	}
 }
 
+// ForSession isolates mutable configuration and skills from other sessions.
+func (v *Virtualizer) ForSession(id string) *Virtualizer {
+	if id == "" {
+		return v
+	}
+	clone := *v
+	sum := sha256.Sum256([]byte(id))
+	clone.baseDir = filepath.Join(v.baseDir, "sessions", fmt.Sprintf("%x", sum[:16]))
+	return &clone
+}
+
 // BaseDir returns the root directory where isolated tool sandboxes reside.
 func (v *Virtualizer) BaseDir() string {
 	return v.baseDir
@@ -74,6 +86,11 @@ func (v *Virtualizer) PrepareSandbox(tool, accountID string) (map[string]string,
 // PrepareSandboxWithSkills ensures the sandbox directory exists, projects only
 // the specified subset of skills, and returns the required environment overrides.
 func (v *Virtualizer) PrepareSandboxWithSkills(tool, accountID string, skillNames []string) (map[string]string, error) {
+	for _, name := range skillNames {
+		if err := ValidateSkillName(name); err != nil {
+			return nil, err
+		}
+	}
 	sandbox := v.SandboxPath(tool, accountID)
 	if err := os.MkdirAll(sandbox, 0700); err != nil {
 		return nil, fmt.Errorf("create sandbox %s: %w", sandbox, err)
@@ -190,6 +207,9 @@ func (v *Virtualizer) PrepareSandboxWithSkills(tool, accountID string, skillName
 
 // AttachSkill dynamically adds an extra skill to an active session sandbox at runtime.
 func (v *Virtualizer) AttachSkill(tool, accountID, skillName string) error {
+	if err := ValidateSkillName(skillName); err != nil {
+		return err
+	}
 	src := filepath.Join(v.skillsPath, skillName)
 	if info, err := os.Stat(src); err != nil || !info.IsDir() {
 		return fmt.Errorf("skill %q not found in %s", skillName, v.skillsPath)
@@ -210,6 +230,9 @@ func (v *Virtualizer) AttachSkill(tool, accountID, skillName string) error {
 
 // DetachSkill removes a skill from a session sandbox at runtime.
 func (v *Virtualizer) DetachSkill(tool, accountID, skillName string) error {
+	if err := ValidateSkillName(skillName); err != nil {
+		return err
+	}
 	sandbox := v.SandboxPath(tool, accountID)
 	dst := filepath.Join(sandbox, "skills", skillName)
 	if _, err := os.Lstat(dst); err == nil {
@@ -336,6 +359,9 @@ func (v *Virtualizer) projectCredentials(tool, accountID, sandbox string) {
 		_ = os.MkdirAll(claudeDir, 0700)
 		hostClaude := filepath.Join(home, ".claude")
 		for _, f := range []string{".credentials.json", "mcp-needs-auth-cache.json", "settings.json"} {
+			if f == ".credentials.json" && accountID != "default" && accountID != "" {
+				continue
+			}
 			src := filepath.Join(hostClaude, f)
 			if _, err := os.Stat(src); err == nil {
 				v.ensureSymlink(src, filepath.Join(sandbox, f))
@@ -349,6 +375,9 @@ func (v *Virtualizer) projectCredentials(tool, accountID, sandbox string) {
 		hostCodex := filepath.Join(home, ".codex")
 		files := []string{"auth.json", "config.toml", "installation_id", "version.json"}
 		for _, f := range files {
+			if f == "auth.json" && accountID != "default" && accountID != "" {
+				continue
+			}
 			src := filepath.Join(hostCodex, f)
 			if _, err := os.Stat(src); err == nil {
 				v.ensureSymlink(src, filepath.Join(sandbox, f))
@@ -446,7 +475,7 @@ func (v *Virtualizer) PrepareAgyAccount(accountID, tokenJSON, email string) erro
 	}
 
 	// Fallback to host token if tokenJSON is empty
-	if tokenJSON == "" && hostGemini != "" {
+	if tokenJSON == "" && hostGemini != "" && (accountID == "" || accountID == "default") {
 		if data, err := os.ReadFile(filepath.Join(hostGemini, "jetski-standalone-oauth-token")); err == nil && len(data) > 0 {
 			tokenJSON = string(data)
 		} else if data, err := os.ReadFile(filepath.Join(hostGemini, "oauth_creds.json")); err == nil && len(data) > 0 {
@@ -670,7 +699,7 @@ func (v *Virtualizer) ReplicateToolPermissions(tool, accountID, projectPath stri
 		claudeDir := filepath.Join(sandbox, ".claude")
 		_ = os.MkdirAll(claudeDir, 0700)
 		hostClaude := filepath.Join(home, ".claude")
-		for _, f := range []string{"settings.json", ".credentials.json", "mcp-needs-auth-cache.json"} {
+		for _, f := range []string{"settings.json", "mcp-needs-auth-cache.json"} {
 			src := filepath.Join(hostClaude, f)
 			if _, err := os.Stat(src); err == nil {
 				v.ensureSymlink(src, filepath.Join(claudeDir, f))
@@ -681,7 +710,7 @@ func (v *Virtualizer) ReplicateToolPermissions(tool, accountID, projectPath stri
 		codexDir := filepath.Join(sandbox, ".codex")
 		_ = os.MkdirAll(codexDir, 0700)
 		hostCodex := filepath.Join(home, ".codex")
-		for _, f := range []string{"config.toml", "hooks.json", "auth.json"} {
+		for _, f := range []string{"config.toml", "hooks.json"} {
 			src := filepath.Join(hostCodex, f)
 			if _, err := os.Stat(src); err == nil {
 				v.ensureSymlink(src, filepath.Join(codexDir, f))
@@ -729,6 +758,14 @@ func (v *Virtualizer) WriteAgyToken(accountID, tokenJSON, email string) error {
 		hintFile := filepath.Join(sandbox, "active_account.json")
 		hintData, _ := json.Marshal(map[string]string{"email": email})
 		_ = os.WriteFile(hintFile, hintData, 0600)
+	}
+	return nil
+}
+
+// ValidateSkillName prevents selections from escaping the skill directory.
+func ValidateSkillName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") || filepath.IsAbs(name) {
+		return fmt.Errorf("invalid skill name %q", name)
 	}
 	return nil
 }

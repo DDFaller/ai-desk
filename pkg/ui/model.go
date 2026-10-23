@@ -57,11 +57,15 @@ type Model struct {
 	currentInspection *deck.SessionInspection
 
 	// Full-screen Modals
-	showInspector     bool
-	showSkillsOverlay bool
-	skillsConfig      *harness.SkillProfilesConfig
-	selectedProfile   int
-	profileKeys       []string
+	showInspector         bool
+	showSkillsOverlay     bool
+	skillsConfig          *harness.SkillProfilesConfig
+	selectedProfile       int
+	profileKeys           []string
+	skillCatalog          bool
+	skillQuery            string
+	skillPreview          string
+	newTaskAccountProfile string
 
 	// Cascade Delete Dialog
 	showDeleteDialog bool
@@ -158,6 +162,7 @@ var availableSkillProfiles = []string{
 	"video",
 	"minimal",
 	"all",
+	"none",
 }
 
 type CommandPaletteItem struct {
@@ -187,7 +192,10 @@ func NewModel() Model {
 	sb := swapbridge.NewSwapBridge("")
 	v := harness.NewVirtualizer("", "")
 	reg, _ := providers.Load("")
-	skillsCfg, _ := harness.LoadSkillProfiles("")
+	skillsCfg, skillsErr := harness.LoadSkillProfiles("")
+	if skillsErr != nil {
+		skillsCfg = &harness.SkillProfilesConfig{Profiles: map[string]harness.ProfileDefinition{"none": {}}}
+	}
 
 	providerSlice := make([]providers.ProviderConfig, 0, len(reg.Providers))
 	for _, p := range reg.Providers {
@@ -416,20 +424,20 @@ func (m Model) submitNewTask() (tea.Model, tea.Cmd) {
 			toolID = availableHarnesses[m.newTaskToolIdx].ID
 		}
 		accountID := "default"
-		if len(m.accounts) > 0 && m.newTaskAccountIdx >= 0 && m.newTaskAccountIdx < len(m.accounts) {
-			accountID = m.accounts[m.newTaskAccountIdx].Email
+		if len(m.newTaskAccounts()) > 0 && m.newTaskAccountIdx >= 0 && m.newTaskAccountIdx < len(m.newTaskAccounts()) {
+			accountID = m.newTaskAccounts()[m.newTaskAccountIdx].Email
 			if accountID == "" {
-				accountID = m.accounts[m.newTaskAccountIdx].ID
+				accountID = m.newTaskAccounts()[m.newTaskAccountIdx].ID
 			}
 		}
 		var selectedProfiles []string
-		for _, p := range availableSkillProfiles {
+		for _, p := range m.skillProfileOptions() {
 			if m.newTaskSkillProfiles != nil && m.newTaskSkillProfiles[p] {
 				selectedProfiles = append(selectedProfiles, p)
 			}
 		}
 		if len(selectedProfiles) == 0 {
-			selectedProfiles = []string{"core"}
+			selectedProfiles = []string{"none"}
 		}
 		profile := strings.Join(selectedProfiles, ",")
 		title := strings.TrimSpace(m.newTaskTitleInput.Value)
@@ -450,13 +458,14 @@ func (m Model) submitNewTask() (tea.Model, tea.Cmd) {
 		}
 
 		opts := deck.CreateTaskOptions{
-			Title:         title,
-			ProjectPath:   path,
-			GroupPath:     group,
-			Tool:          toolID,
-			Account:       accountID,
-			SkillProfile:  profile,
-			InitialPrompt: prompt,
+			Title:          title,
+			ProjectPath:    path,
+			GroupPath:      group,
+			Tool:           toolID,
+			Account:        accountID,
+			AccountProfile: m.newTaskAccountProfile,
+			SkillProfile:   profile,
+			InitialPrompt:  prompt,
 		}
 		inst, err := m.sdb.CreateTask(m.v, opts)
 		if err != nil {
@@ -516,6 +525,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		key := msg.String()
+		if m.showSkillsOverlay {
+			return m.updateSkills(msg)
+		}
 
 		// 1. Delete Confirmation Dialog Modal
 		if m.showDeleteDialog {
@@ -611,6 +623,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 1c. Switch Account Modal
 		if m.showAccountDialog {
 			switch key {
+			case "p", "f", "b":
+				m.changeAccountProfile(key)
+				return m, nil
 			case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 				idx := int(key[0] - '1')
 				if idx < len(m.accounts) {
@@ -653,6 +668,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// 1d. New Task Modal
 		if m.showNewTaskDialog {
+			if key == "ctrl+g" {
+				cfg, err := rotation.LoadAccountProfiles("")
+				if err != nil {
+					m.setToast(err.Error())
+				} else {
+					m.newTaskAccountProfile = nextProfile(m.newTaskAccountProfile, cfg)
+				}
+				return m, nil
+			}
 			m.syncNewTaskStrings()
 
 			// Global hotkeys in New Task modal:
@@ -978,14 +1002,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case 4: // Account Selector
-				if len(m.accounts) > 0 {
+				if len(m.newTaskAccounts()) > 0 {
 					if key == "left" || key == "h" {
-						m.newTaskAccountIdx = (m.newTaskAccountIdx + len(m.accounts) - 1) % len(m.accounts)
+						m.newTaskAccountIdx = (m.newTaskAccountIdx + len(m.newTaskAccounts()) - 1) % len(m.newTaskAccounts())
 					} else if key == "right" || key == "l" || key == " " {
-						m.newTaskAccountIdx = (m.newTaskAccountIdx + 1) % len(m.accounts)
+						m.newTaskAccountIdx = (m.newTaskAccountIdx + 1) % len(m.newTaskAccounts())
 					} else if key >= "1" && key <= "9" {
 						idx := int(key[0] - '1')
-						if idx < len(m.accounts) {
+						if idx < len(m.newTaskAccounts()) {
 							m.newTaskAccountIdx = idx
 						}
 					}
@@ -1001,16 +1025,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.newTaskSkillProfiles = map[string]bool{"core": true}
 				}
 				if key == "left" || key == "h" {
-					m.newTaskSkillCursor = (m.newTaskSkillCursor + len(availableSkillProfiles) - 1) % len(availableSkillProfiles)
+					m.newTaskSkillCursor = (m.newTaskSkillCursor + len(m.skillProfileOptions()) - 1) % len(m.skillProfileOptions())
 				} else if key == "right" || key == "l" {
-					m.newTaskSkillCursor = (m.newTaskSkillCursor + 1) % len(availableSkillProfiles)
+					m.newTaskSkillCursor = (m.newTaskSkillCursor + 1) % len(m.skillProfileOptions())
 				} else if key == " " {
-					prof := availableSkillProfiles[m.newTaskSkillCursor]
+					prof := m.skillProfileOptions()[m.newTaskSkillCursor]
 					m.newTaskSkillProfiles[prof] = !m.newTaskSkillProfiles[prof]
-				} else if key >= "1" && key <= fmt.Sprintf("%d", len(availableSkillProfiles)) {
+				} else if key >= "1" && key <= fmt.Sprintf("%d", len(m.skillProfileOptions())) {
 					idx := int(key[0] - '1')
-					if idx >= 0 && idx < len(availableSkillProfiles) {
-						prof := availableSkillProfiles[idx]
+					if idx >= 0 && idx < len(m.skillProfileOptions()) {
+						prof := m.skillProfileOptions()[idx]
 						m.newTaskSkillProfiles[prof] = !m.newTaskSkillProfiles[prof]
 					}
 				} else if key == "up" {
@@ -1414,9 +1438,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.treeItems) > 0 {
 				item := m.treeItems[m.selectedTreeIdx]
 				if !item.IsGroup && item.Session != nil {
+					m.accounts, _ = harness.ListAccounts(item.Session.Tool)
 					if len(m.accounts) == 0 {
-						m.setToast("No accounts available in agy-swap vault.")
-						return m, nil
+						m.accounts = []rotation.AccountStatus{{ID: "default", Email: "default", Provider: item.Session.Tool}}
 					}
 					m.showAccountDialog = true
 					m.accountTargetInst = item.Session
@@ -2794,7 +2818,7 @@ func (m Model) renderAccountDialog(width, height int) string {
 	lines = append(lines, header)
 
 	subInfo := fmt.Sprintf("Harness: %s   •   Current: %s", RenderToolBadge(currTool), lipgloss.NewStyle().Foreground(successColor).Bold(true).Render(currAccount))
-	lines = append(lines, subInfo)
+	lines = append(lines, subInfo, m.accountProfileSummary())
 	lines = append(lines, divider)
 
 	lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(primaryColor).Render("Select Target Account:"))
@@ -2859,6 +2883,7 @@ func (m Model) renderNewTaskDialog(width, height int) string {
 	bStyle := activeBorder
 
 	var lines []string
+	lines = append(lines, "Account profile: "+m.newTaskAccountProfile+" [Ctrl+G to cycle; blank = global default]")
 	divWidth := width - 4
 	if divWidth < 10 {
 		divWidth = 10
@@ -3011,8 +3036,8 @@ func (m Model) renderNewTaskDialog(width, height int) string {
 
 		accName := "default"
 		quotaStr := ""
-		if len(m.accounts) > 0 && m.newTaskAccountIdx >= 0 && m.newTaskAccountIdx < len(m.accounts) {
-			acc := m.accounts[m.newTaskAccountIdx]
+		if len(m.newTaskAccounts()) > 0 && m.newTaskAccountIdx >= 0 && m.newTaskAccountIdx < len(m.newTaskAccounts()) {
+			acc := m.newTaskAccounts()[m.newTaskAccountIdx]
 			accName = acc.Email
 			if accName == "" {
 				accName = acc.ID
@@ -3022,7 +3047,7 @@ func (m Model) renderNewTaskDialog(width, height int) string {
 		}
 		var accDisplay string
 		if isFocused {
-			accDisplay = lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(fmt.Sprintf("[%d/%d] %s%s", m.newTaskAccountIdx+1, len(m.accounts), accName, quotaStr)) +
+			accDisplay = lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(fmt.Sprintf("[%d/%d] %s%s", m.newTaskAccountIdx+1, len(m.newTaskAccounts()), accName, quotaStr)) +
 				" " + lipgloss.NewStyle().Foreground(subtleColor).Render("(←/→/Space/1-9)")
 		} else {
 			accDisplay = lipgloss.NewStyle().Foreground(lipgloss.Color("#a9b1d6")).Render(accName + quotaStr)
@@ -3045,7 +3070,7 @@ func (m Model) renderNewTaskDialog(width, height int) string {
 		}
 
 		var profBadges []string
-		for idx, p := range availableSkillProfiles {
+		for idx, p := range m.skillProfileOptions() {
 			isSelected := m.newTaskSkillProfiles[p]
 			isUnderCursor := isFocused && idx == m.newTaskSkillCursor
 
@@ -3081,45 +3106,7 @@ func (m Model) renderNewTaskDialog(width, height int) string {
 	return bStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
-func (m Model) renderSkillsOverlay(width, height int) string {
-	bStyle := activeBorder
-
-	var lines []string
-	lines = append(lines, headerStyle.Render("Skills Manager (~/.ai-desk/skill-profiles.yaml)"))
-	lines = append(lines, lipgloss.NewStyle().Foreground(subtleColor).Render("Select a profile to inspect its prompt tax. Extra skills attach consciously at runtime."))
-	lines = append(lines, "")
-
-	for i, name := range m.profileKeys {
-		pDef := m.skillsConfig.Profiles[name]
-		skills, _ := m.skillsConfig.ResolveSkills(name, "")
-		count := len(skills)
-		tokenTax := count * 60
-		if count >= 70 {
-			tokenTax = 4500
-		}
-
-		taxColor := successColor
-		if tokenTax > 2000 {
-			taxColor = errorColor
-		} else if tokenTax > 800 {
-			taxColor = warningColor
-		}
-
-		taxBadge := lipgloss.NewStyle().Foreground(taxColor).Bold(true).Render(fmt.Sprintf("~%d tok/turn", tokenTax))
-		row := fmt.Sprintf("%-12s  %-14s  (%2d skills)  %s", name, taxBadge, count, pDef.Description)
-
-		if i == m.selectedProfile {
-			lines = append(lines, selectedRow.Width(width-4).Render("▶ "+row))
-		} else {
-			lines = append(lines, normalRow.Render("  "+row))
-		}
-	}
-
-	lines = append(lines, "")
-	lines = append(lines, lipgloss.NewStyle().Foreground(accentColor).Render("CLI Quick Command: ai-desk skills attach <session> <skill_name>"))
-
-	return bStyle.Width(width).Height(height).Render(strings.Join(lines, "\n"))
-}
+func (m Model) renderSkillsOverlay(width, height int) string { return m.skillsView(width, height) }
 
 func (m Model) renderProgressBar(pct float64, width int) string {
 	filled := int((pct / 100.0) * float64(width))

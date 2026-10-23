@@ -162,6 +162,9 @@ func cmdRun(args []string) {
 		if args[i] == "--skills" && i+1 < len(args) {
 			shimArgs = append(shimArgs, "-skills", args[i+1])
 			i++
+		} else if args[i] == "--account-profile" && i+1 < len(args) {
+			shimArgs = append(shimArgs, "-account-profile", args[i+1])
+			i++
 		} else {
 			shimArgs = append(shimArgs, args[i])
 		}
@@ -285,6 +288,49 @@ func cmdSkills(args []string) {
 		fmt.Println("  • career:  ~1080 tokens/turn  (saves 76% prompt overhead)")
 		fmt.Println()
 
+	case "set", "add", "remove":
+		if len(args) < 3 {
+			fmt.Println("Usage: ai-desk skills set <session> <profile> | add/remove <session> <skill>")
+			return
+		}
+		sdb, err := deck.OpenStateDB("")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		defer sdb.Close()
+		inst, err := sdb.FindInstance(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		var skills []string
+		profile := args[2]
+		if sub == "set" {
+			skills, err = cfg.ResolveSkills(profile, v.SkillsPath())
+		} else {
+			profile = "custom"
+			skills, err = deck.SessionSkills(v, inst)
+			if sub == "add" {
+				skills = append(skills, args[2])
+			} else {
+				var kept []string
+				for _, s := range skills {
+					if s != args[2] {
+						kept = append(kept, s)
+					}
+				}
+				skills = kept
+			}
+		}
+		if err == nil {
+			err = sdb.SetSessionSkills(v, inst.ID, profile, skills)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		fmt.Println("Selection saved; restart the session to apply.")
 	case "attach":
 		if len(args) < 4 {
 			fmt.Println("Usage: ai-desk skills attach <tool> <account_id> <skill_name>")
@@ -510,6 +556,11 @@ func cmdTaskCreate(args []string) {
 		case "--path":
 			if i+1 < len(args) {
 				opts.ProjectPath = args[i+1]
+				i++
+			}
+		case "--account-profile":
+			if i+1 < len(args) {
+				opts.AccountProfile = args[i+1]
 				i++
 			}
 		case "--account":
@@ -1331,6 +1382,30 @@ func cmdProfile(args []string) {
 	}
 
 	switch action {
+	case "session":
+		if len(args) < 3 {
+			fmt.Println("Usage: ai-desk profile session <session> <profile>")
+			return
+		}
+		db, err := deck.OpenStateDB("")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		defer db.Close()
+		if err := db.SetAccountProfile(args[1], args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	case "import":
+		if len(args) < 4 {
+			fmt.Println("Usage: ai-desk profile import <codex|claude> <account-id> <credential-file>")
+			return
+		}
+		if err := harness.ImportAccount(args[1], args[2], args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		} else {
+			fmt.Println("Account credentials imported.")
+		}
 	case "list":
 		fmt.Printf("\n\033[1;36m=== Account Profiles & Routing Policies ===\033[0m\n")
 		fmt.Printf("Active Profile: \033[1;32m%s\033[0m\n\n", cfg.ActiveProfile)

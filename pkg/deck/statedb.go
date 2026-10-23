@@ -24,20 +24,20 @@ type GroupRecord struct {
 
 // InstanceRecord mirrors a row from agent-deck's instances table.
 type InstanceRecord struct {
-	ID          string
-	Title       string
-	ProjectPath string
-	GroupPath   string
-	SortOrder   int
-	Command     string
-	Wrapper     string
-	Tool        string
-	Status      string
-	TmuxSession string
-	CreatedAt   int64
+	ID           string
+	Title        string
+	ProjectPath  string
+	GroupPath    string
+	SortOrder    int
+	Command      string
+	Wrapper      string
+	Tool         string
+	Status       string
+	TmuxSession  string
+	CreatedAt    int64
 	LastAccessed int64
-	Account     string
-	ToolData    string
+	Account      string
+	ToolData     string
 }
 
 // TokenUsage holds token metrics aggregated from transcript / cost events.
@@ -112,7 +112,12 @@ func OpenStateDB(dbPath string) (*StateDB, error) {
 		}
 	}
 
-	return &StateDB{db: db, path: dbPath}, nil
+	s := &StateDB{db: db, path: dbPath}
+	if err := s.SnapshotAccountProfiles(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("snapshot session profiles: %w", err)
+	}
+	return s, nil
 }
 
 // DB returns the underlying sql.DB pointer.
@@ -356,4 +361,3 @@ func UpdateInstanceAccountDirect(db *sql.DB, id, account string) error {
 	}
 	return nil
 }
-

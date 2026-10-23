@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/falluba/ai-desk/pkg/harness"
-	"github.com/falluba/ai-desk/pkg/swapbridge"
+	"github.com/falluba/ai-desk/pkg/rotation"
 )
 
 var nonAlphaNumericRegex = regexp.MustCompile(`[^a-zA-Z0-9_\-]+`)
@@ -31,13 +31,15 @@ func sanitizeSessionSlug(s string) string {
 
 // CreateTaskOptions specifies parameters for launching a new task.
 type CreateTaskOptions struct {
-	Title         string
-	ProjectPath   string
-	GroupPath     string
-	Tool          string // agy, claude, codex, opencode
-	Account       string // e.g. danielmcf15@gmail.com
-	SkillProfile  string // e.g. core, backend, web, minimal, all
-	InitialPrompt string
+	Title          string
+	ProjectPath    string
+	GroupPath      string
+	Tool           string // agy, claude, codex, opencode
+	AccountProfile string
+	SelectedSkills []string // nil resolves profile; empty slice explicitly selects no skills
+	Account        string   // e.g. danielmcf15@gmail.com
+	SkillProfile   string   // e.g. core, backend, web, minimal, all
+	InitialPrompt  string
 }
 
 // CreateTask provisions a new task in state.db, sets up the isolated sandbox
@@ -71,8 +73,7 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 
 	tool, cmd, err := NormalizeHarnessName(opts.Tool)
 	if err != nil {
-		tool = "agy"
-		cmd = "agy"
+		return nil, err
 	}
 
 	account := strings.TrimSpace(opts.Account)
@@ -82,7 +83,7 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 
 	skillProfile := strings.TrimSpace(opts.SkillProfile)
 	if skillProfile == "" {
-		skillProfile = "core"
+		skillProfile = "none"
 	}
 
 	if tool == "vox-studio" {
@@ -116,29 +117,39 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 	if virt == nil {
 		virt = harness.NewVirtualizer("", "")
 	}
-	var skillsToProject []string
-	if skillProfile == "all" {
-		skillsToProject, _ = harness.ListAllSkillNames(virt.SkillsPath())
-	} else if skillProfile != "" {
-		cfg, pErr := harness.LoadSkillProfiles("")
-		if pErr == nil {
-			resolved, rErr := cfg.ResolveSkills(skillProfile, "")
-			if rErr == nil {
-				skillsToProject = resolved
-			}
+	profiles, err := rotation.LoadAccountProfiles("")
+	if err != nil {
+		return nil, err
+	}
+	accountProfile := opts.AccountProfile
+	if accountProfile == "" {
+		accountProfile = profiles.ActiveProfile
+	}
+	if _, ok := profiles.Profiles[accountProfile]; !ok {
+		return nil, fmt.Errorf("unknown account profile %q", accountProfile)
+	}
+	skillsToProject := opts.SelectedSkills
+	if skillsToProject == nil {
+		cfg, err := harness.LoadSkillProfiles("")
+		if err != nil {
+			return nil, err
+		}
+		if skillProfile == "auto" {
+			skillProfile = harness.DetectWorkspaceProfile(projectPath)
+		}
+		skillsToProject, err = cfg.ResolveSkills(skillProfile, virt.SkillsPath())
+		if err != nil {
+			return nil, err
 		}
 	}
-	if len(skillsToProject) == 0 {
-		skillsToProject = []string{
-			"shadcn", "verification", "auth", "react-best-practices",
-			"env-vars", "deployments-cicd", "bootstrap",
-		}
+	account, err = RouteAccount(tool, accountProfile, account)
+	if err != nil {
+		return nil, err
 	}
+	virt = virt.ForSession(id)
 
-	if tool == "agy" || tool == "gemini" {
-		sb := swapbridge.NewSwapBridge("")
-		token, _ := sb.ReadAccountToken(account)
-		_ = virt.PrepareAgyAccount(account, token, account)
+	if err := virt.PrepareCredentials(tool, account); err != nil {
+		return nil, err
 	}
 
 	envOverrides, err := virt.PrepareSandboxWithSkills(tool, account, skillsToProject)
@@ -149,9 +160,12 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 
 	// 4. Construct tool_data JSON
 	toolDataMap := map[string]interface{}{
-		"skill_profile": skillProfile,
-		"created_by":    "ai-desk",
-		"created_at":    time.Now().Unix(),
+		"skill_profile":   skillProfile,
+		"account_profile": accountProfile,
+		"config_version":  1,
+		"selected_skills": append([]string{}, skillsToProject...),
+		"created_by":      "ai-desk",
+		"created_at":      time.Now().Unix(),
 	}
 	if opts.InitialPrompt != "" {
 		toolDataMap["initial_prompt"] = opts.InitialPrompt
@@ -185,7 +199,10 @@ func (s *StateDB) CreateTask(virt *harness.Virtualizer, opts CreateTaskOptions) 
 	}
 
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", tmuxSession, "-c", projectPath, launchCmd)
-	if tErr := tmuxCmd.Run(); tErr == nil {
+	if output, tErr := tmuxCmd.CombinedOutput(); tErr != nil {
+		_, _ = s.db.Exec("UPDATE instances SET status = 'error' WHERE id = ?", id)
+		return nil, fmt.Errorf("launch task: %w: %s", tErr, strings.TrimSpace(string(output)))
+	} else {
 		for k, v := range envOverrides {
 			_ = exec.Command("tmux", "set-environment", "-t", tmuxSession, k, v).Run()
 		}

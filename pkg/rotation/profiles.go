@@ -130,7 +130,10 @@ func (cfg *AccountProfilesConfig) FilterAccounts(profileName string, allAccounts
 	}
 
 	p, ok := cfg.Profiles[profileName]
-	if !ok || len(p.Accounts) == 0 {
+	if !ok {
+		return nil
+	}
+	if len(p.Accounts) == 0 {
 		return allAccounts
 	}
 
@@ -144,11 +147,6 @@ func (cfg *AccountProfilesConfig) FilterAccounts(profileName string, allAccounts
 		if wanted[strings.ToLower(acc.Email)] || wanted[strings.ToLower(acc.ID)] {
 			filtered = append(filtered, acc)
 		}
-	}
-
-	// If no match was found, fallback to all accounts to avoid starving
-	if len(filtered) == 0 {
-		return allAccounts
 	}
 
 	return filtered

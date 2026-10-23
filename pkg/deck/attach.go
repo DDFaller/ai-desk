@@ -205,9 +205,13 @@ func recoveryCommand(virt *harness.Virtualizer, inst *InstanceRecord) (string, m
 		if account == "" {
 			account = "default"
 		}
-		skills, err := virt.ListAttachedSkills(inst.Tool, account)
+		skills, err := SessionSkills(virt, inst)
+		virt = SessionVirtualizer(virt, inst)
 		if err != nil {
 			return "", nil, fmt.Errorf("restore session skills: %w", err)
+		}
+		if err := virt.PrepareCredentials(inst.Tool, account); err != nil {
+			return "", nil, err
 		}
 		env, err = virt.PrepareSandboxWithSkills(inst.Tool, account, skills)
 		if err != nil {

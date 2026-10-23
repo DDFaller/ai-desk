@@ -92,7 +92,7 @@ func TestCreateTask(t *testing.T) {
 	}
 
 	// Verify sandbox directory was created
-	sandbox := virt.SandboxPath("agy", "tester@example.com")
+	sandbox := virt.ForSession(inst.ID).SandboxPath("agy", "tester@example.com")
 	if _, err := os.Stat(sandbox); err != nil {
 		t.Errorf("expected sandbox directory to exist at %s", sandbox)
 	}
