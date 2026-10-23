@@ -3,6 +3,7 @@ package harness
 import (
 	"bufio"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,7 +38,7 @@ type SkillAuditReport struct {
 
 // DefaultSkillProfilesPath returns ~/.ai-desk/skill-profiles.yaml
 func DefaultSkillProfilesPath() string {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	return filepath.Join(home, ".ai-desk", "skill-profiles.yaml")
 }
 
@@ -188,7 +189,7 @@ func DetectWorkspaceProfile(workdir string) string {
 // ListAllSkillNames reads canonical skills directory and returns all subfolder names.
 func ListAllSkillNames(canonicalSkillsDir string) ([]string, error) {
 	if canonicalSkillsDir == "" {
-		home, _ := os.UserHomeDir()
+		home, _ := configpaths.HomeDir()
 		canonicalSkillsDir = filepath.Join(home, ".agents", "skills")
 	}
 
@@ -216,7 +217,7 @@ func ListAllSkillNames(canonicalSkillsDir string) ([]string, error) {
 // AuditSkills performs an in-depth audit of word count and prompt tax across canonical skills.
 func AuditSkills(canonicalSkillsDir string) (*SkillAuditReport, error) {
 	if canonicalSkillsDir == "" {
-		home, _ := os.UserHomeDir()
+		home, _ := configpaths.HomeDir()
 		canonicalSkillsDir = filepath.Join(home, ".agents", "skills")
 	}
 

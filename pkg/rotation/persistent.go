@@ -3,6 +3,7 @@ package rotation
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -11,7 +12,7 @@ import (
 
 // FailoverPersisted shares cooldowns across the TUI, monitor, shim and restarts.
 func FailoverPersisted(candidates []AccountStatus, failedID string, duration time.Duration, policy Policy, provider string) (AccountStatus, error) {
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	dir := filepath.Join(home, ".ai-desk")
 	if p := os.Getenv("AI_DESK_RUNTIME_DIR"); p != "" {
 		dir = p

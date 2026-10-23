@@ -48,3 +48,9 @@ The shim respects the routing profile and uses provider-compatible credentials. 
 Back up state.db using SQLite's backup command before running the new version against live data. Metadata additions preserve unrelated tool_data fields and upstream table shapes. Keep the baseline binary available. Rolling back the binary does not require deleting new directories or memory. Avoid switching an active session back to an old account-shared skill directory; finish or explicitly restart it first.
 
 The next branch builds persistent agents and the ADE-inspired TUI. It remains a preview until stabilization's live acceptance gate is met.
+
+### Test isolation correction
+
+The inherited UI tests could open the live session database. An early validation run exercised the profile snapshot migration there; 108 records were subsequently observed with profile metadata. No prior field-level snapshot exists, so exact historical attribution is unavailable. No rollback was attempted that might overwrite newer state. UI tests now use a temporary home, absent database path and tmux shim.
+
+Configuration lookup also resolves the operator home when ai-desk itself runs inside a managed harness, preventing a scoped skill directory from hiding the canonical catalog. `AI_DESK_USER_HOME` can explicitly select that home.

@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/falluba/ai-desk/pkg/configpaths"
 	"github.com/falluba/ai-desk/pkg/rotation"
 	"github.com/falluba/ai-desk/pkg/swapbridge"
 	"os"
@@ -15,7 +16,7 @@ func AccountsPath() string {
 	if p := os.Getenv("AI_DESK_ACCOUNTS_DIR"); p != "" {
 		return p
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := configpaths.HomeDir()
 	return filepath.Join(home, ".ai-desk", "accounts")
 }
 

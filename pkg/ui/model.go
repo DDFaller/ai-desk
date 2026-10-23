@@ -23,7 +23,7 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-const Version = "0.3.5"
+const Version = "0.3.6-rc1"
 
 type FocusPane int
 
