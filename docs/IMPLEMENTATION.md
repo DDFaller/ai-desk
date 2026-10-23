@@ -60,3 +60,9 @@ The full unit suite, targeted race checks, vet, builds and the isolated real-tmu
 The inherited UI tests could open the live session database. An early validation run exercised the profile snapshot migration there; 108 records were subsequently observed with profile metadata. No prior field-level snapshot exists, so exact historical attribution is unavailable. No rollback was attempted that might overwrite newer state. UI tests now use a temporary home, absent database path and tmux shim.
 
 Configuration lookup also resolves the operator home when ai-desk itself runs inside a managed harness, preventing a scoped skill directory from hiding the canonical catalog. `AI_DESK_USER_HOME` can explicitly select that home.
+
+### Antigravity startup preferences
+
+Managed launches now inherit missing keys from the operator's `.gemini/antigravity-cli/settings.json` and `cache/nux_state.json`. These are separate from Gemini's `.gemini/settings.json`. Existing session choices take precedence, including explicit false values. In-place Antigravity restarts and account switches copy these preferences from the previous sandbox generation before applying host defaults. Settings remain independent files; credentials and skill directories are not included in this transfer. No permission values or onboarding acknowledgments are fabricated.
+
+Regression tests cover initial inheritance, preservation on repeated preparation, replacement with a different account, onboarding state, independent writes, and malformed JSON. Interactive Antigravity startup still requires a live user check after reopening the rebuilt ai-desk binary.

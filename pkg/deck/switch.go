@@ -224,8 +224,14 @@ func SwitchHarness(sdb *StateDB, virt *harness.Virtualizer, sessionIDOrTitle str
 		sessionCfg.SkillProfile = opts.SkillProfile
 	}
 	baseVirtualizer := virt
+	previousVirtualizer := SessionVirtualizer(virt, inst)
 	sessionCfg.SandboxID = fmt.Sprintf("%s-%x", inst.ID, time.Now().UnixNano())
 	virt = virt.ForSession(sessionCfg.SandboxID)
+	if (oldTool == "agy" || oldTool == "gemini") && (targetTool == "agy" || targetTool == "gemini") {
+		if err := harness.InheritAgyPreferences(previousVirtualizer.SandboxPath(oldTool, inst.Account), virt.SandboxPath(targetTool, accountID)); err != nil {
+			return nil, fmt.Errorf("preserve Antigravity preferences: %w", err)
+		}
+	}
 	if err := virt.PrepareCredentials(targetTool, accountID); err != nil {
 		return nil, err
 	}

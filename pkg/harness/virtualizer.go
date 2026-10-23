@@ -182,7 +182,9 @@ func (v *Virtualizer) PrepareSandboxWithSkills(tool, accountID string, skillName
 
 	// Project host credentials and configuration into sandbox
 	v.projectCredentials(tool, accountID, sandbox)
-	_ = v.ReplicateToolPermissions(tool, accountID, "")
+	if err := v.ReplicateToolPermissions(tool, accountID, ""); err != nil {
+		return nil, err
+	}
 
 	env := make(map[string]string)
 	switch tool {
@@ -694,6 +696,9 @@ func (v *Virtualizer) ReplicateToolPermissions(tool, accountID, projectPath stri
 		hostSettings := filepath.Join(home, ".gemini", "settings.json")
 		if data, err := os.ReadFile(hostSettings); err == nil {
 			_ = os.WriteFile(filepath.Join(geminiDir, "settings.json"), data, 0600)
+		}
+		if err := InheritAgyPreferences(home, sandbox); err != nil {
+			return err
 		}
 
 	case "claude":
